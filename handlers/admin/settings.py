@@ -19,6 +19,9 @@ async def admin_settings_start(update: Update, context):
         await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
     
+    # Очищаем контекст при входе в настройки
+    context.user_data.clear()
+    
     keyboard = [
         [InlineKeyboardButton("👥 Управление продавцами", callback_data="settings_sellers")],
         [InlineKeyboardButton("🏷️ Товары и цены", callback_data="settings_products")],
@@ -508,11 +511,17 @@ async def seller_cancel(update: Update, context):
     context.user_data.clear()
     return MAIN_MENU
 
-# === ТОВАРЫ И ЦЕНЫ ===
+# === ТОВАРЫ И ЦЕНЫ (ИСПРАВЛЕННАЯ ВЕРСИЯ) ===
 async def settings_products(update: Update, context):
     """Меню управления товарами и ценами"""
     query = update.callback_query
     await query.answer()
+    
+    # Очищаем контекст при входе в раздел товаров
+    keys_to_remove = ['edit_product_id', 'new_product_name', 'new_product_price']
+    for key in keys_to_remove:
+        if key in context.user_data:
+            del context.user_data[key]
     
     # Получаем список товаров
     with db.get_connection() as conn:
@@ -546,6 +555,12 @@ async def product_add_start(update: Update, context):
     """Начало добавления нового товара"""
     query = update.callback_query
     await query.answer()
+    
+    # Очищаем старые данные о товаре
+    if 'new_product_name' in context.user_data:
+        del context.user_data['new_product_name']
+    if 'new_product_price' in context.user_data:
+        del context.user_data['new_product_price']
     
     await query.edit_message_text(
         "➕ Добавление нового товара - Шаг 1 из 2\n\n"
@@ -628,8 +643,8 @@ async def product_add_price(update: Update, context):
     product_name = context.user_data.get('new_product_name')
     
     if not product_name:
-        await update.message.reply_text("❌ Ошибка: название не найдено")
-        return ConversationHandler.END
+        await update.message.reply_text("❌ Ошибка: название не найдено. Начните заново.")
+        return ADD_PRODUCT
     
     # Показываем подтверждение
     keyboard = [
@@ -662,7 +677,7 @@ async def product_confirm(update: Update, context):
     
     if not product_name or not product_price:
         await query.edit_message_text("❌ Ошибка: данные не найдены")
-        return ConversationHandler.END
+        return PRODUCTS_MENU
     
     try:
         with db.get_connection() as conn:
@@ -701,7 +716,14 @@ async def product_confirm(update: Update, context):
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка: {e}")
     
-    context.user_data.clear()
+    # Очищаем данные о товаре из контекста
+    if 'new_product_name' in context.user_data:
+        del context.user_data['new_product_name']
+    if 'new_product_price' in context.user_data:
+        del context.user_data['new_product_price']
+    if 'edit_product_id' in context.user_data:
+        del context.user_data['edit_product_id']
+    
     return PRODUCTS_MENU
 
 async def product_edit_start(update: Update, context):
@@ -710,6 +732,11 @@ async def product_edit_start(update: Update, context):
     await query.answer()
     
     product_id = int(query.data.replace('product_edit_', ''))
+    
+    # Очищаем старые данные перед редактированием
+    if 'edit_product_id' in context.user_data:
+        del context.user_data['edit_product_id']
+    
     context.user_data['edit_product_id'] = product_id
     
     with db.get_connection() as conn:
@@ -746,8 +773,20 @@ async def product_change_price(update: Update, context):
     query = update.callback_query
     await query.answer()
     
+    product_id = context.user_data.get('edit_product_id')
+    
+    if not product_id:
+        await query.edit_message_text(
+            "❌ Ошибка: товар не выбран",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
+            ]])
+        )
+        return PRODUCTS_MENU
+    
     await query.edit_message_text(
-        "💰 Введите новую цену товара (в рублях):",
+        f"💰 Введите новую цену товара (в рублях):\n\n"
+        f"(Для отмены нажмите кнопку ниже)",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("❌ Отмена", callback_data="product_cancel_edit")
         ]])
@@ -771,7 +810,10 @@ async def product_update_price(update: Update, context):
     except ValueError:
         await update.message.reply_text(
             "❌ Цена должна быть положительным числом\n"
-            "Попробуйте снова:"
+            "Попробуйте снова:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Отмена", callback_data="product_cancel_edit")
+            ]])
         )
         return EDIT_PRODUCT_PRICE
     
@@ -810,7 +852,10 @@ async def product_update_price(update: Update, context):
         ]])
     )
     
-    context.user_data.clear()
+    # Очищаем данные о товаре из контекста
+    if 'edit_product_id' in context.user_data:
+        del context.user_data['edit_product_id']
+    
     return PRODUCTS_MENU
 
 async def product_toggle_status(update: Update, context):
@@ -819,6 +864,15 @@ async def product_toggle_status(update: Update, context):
     await query.answer()
     
     product_id = context.user_data.get('edit_product_id')
+    
+    if not product_id:
+        await query.edit_message_text(
+            "❌ Ошибка: товар не выбран",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
+            ]])
+        )
+        return PRODUCTS_MENU
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
@@ -829,21 +883,36 @@ async def product_toggle_status(update: Update, context):
             new_status = 0 if product['is_active'] else 1
             cursor.execute("UPDATE products SET is_active = ? WHERE id = ?", (new_status, product_id))
             status_text = "активирован" if new_status else "скрыт"
+            product_name = product['product_name']
     
     await query.edit_message_text(
-        f"✅ Статус товара '{product['product_name']}' изменен на '{status_text}'",
+        f"✅ Статус товара '{product_name}' изменен на '{status_text}'",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
         ]])
     )
     
-    context.user_data.clear()
+    # Очищаем данные о товаре из контекста
+    if 'edit_product_id' in context.user_data:
+        del context.user_data['edit_product_id']
+    
     return PRODUCTS_MENU
 
 async def product_delete(update: Update, context):
     """Подтверждение удаления товара"""
     query = update.callback_query
     await query.answer()
+    
+    product_id = context.user_data.get('edit_product_id')
+    
+    if not product_id:
+        await query.edit_message_text(
+            "❌ Ошибка: товар не выбран",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
+            ]])
+        )
+        return PRODUCTS_MENU
     
     keyboard = [
         [InlineKeyboardButton("✅ Да, удалить", callback_data="product_confirm_delete")],
@@ -866,6 +935,15 @@ async def product_confirm_delete(update: Update, context):
     
     product_id = context.user_data.get('edit_product_id')
     
+    if not product_id:
+        await query.edit_message_text(
+            "❌ Ошибка: товар не выбран",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
+            ]])
+        )
+        return PRODUCTS_MENU
+    
     try:
         with db.get_connection() as conn:
             cursor = conn.cursor()
@@ -886,7 +964,10 @@ async def product_confirm_delete(update: Update, context):
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка удаления: {e}")
     
-    context.user_data.clear()
+    # Очищаем данные о товаре из контекста
+    if 'edit_product_id' in context.user_data:
+        del context.user_data['edit_product_id']
+    
     return PRODUCTS_MENU
 
 async def product_cancel(update: Update, context):
@@ -894,6 +975,13 @@ async def product_cancel(update: Update, context):
     query = update.callback_query
     if query:
         await query.answer()
+        
+        # Очищаем данные о товаре из контекста
+        keys_to_remove = ['edit_product_id', 'new_product_name', 'new_product_price']
+        for key in keys_to_remove:
+            if key in context.user_data:
+                del context.user_data[key]
+        
         await query.edit_message_text(
             "❌ Действие отменено",
             reply_markup=InlineKeyboardMarkup([[
@@ -906,7 +994,6 @@ async def product_cancel(update: Update, context):
             reply_markup=get_admin_menu()
         )
     
-    context.user_data.clear()
     return PRODUCTS_MENU
 
 # === ОБЩИЕ ФУНКЦИИ ===
@@ -914,6 +1001,9 @@ async def back_to_main(update: Update, context):
     """Возврат в главное меню настроек"""
     query = update.callback_query
     await query.answer()
+    
+    # Очищаем контекст при возврате в главное меню
+    context.user_data.clear()
     
     keyboard = [
         [InlineKeyboardButton("👥 Управление продавцами", callback_data="settings_sellers")],
@@ -932,6 +1022,9 @@ async def exit_settings(update: Update, context):
     """Выход из настроек"""
     query = update.callback_query
     await query.answer()
+    
+    # Полностью очищаем контекст при выходе
+    context.user_data.clear()
     
     await query.edit_message_text(
         "Выход в главное меню",
@@ -995,7 +1088,7 @@ admin_settings_conv = ConversationHandler(
         ],
         EDIT_PRODUCT_PRICE: [
             CallbackQueryHandler(product_confirm, pattern='^product_confirm$'),
-            CallbackQueryHandler(product_edit_start, pattern='^product_edit_name$'),
+            CallbackQueryHandler(product_add_start, pattern='^product_edit_name$'),
             CallbackQueryHandler(product_change_price, pattern='^product_change_price$'),
             CallbackQueryHandler(product_toggle_status, pattern='^product_toggle_status$'),
             CallbackQueryHandler(product_delete, pattern='^product_delete$'),
