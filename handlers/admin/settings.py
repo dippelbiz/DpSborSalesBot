@@ -777,11 +777,31 @@ async def product_update_price(update: Update, context):
     
     product_id = context.user_data.get('edit_product_id')
     
+    if not product_id:
+        await update.message.reply_text(
+            "❌ Ошибка: товар не выбран",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
+            ]])
+        )
+        return PRODUCTS_MENU
+    
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("UPDATE products SET price = ? WHERE id = ?", (price, product_id))
         cursor.execute("SELECT product_name FROM products WHERE id = ?", (product_id,))
-        product_name = cursor.fetchone()[0]
+        result = cursor.fetchone()
+        
+        if not result:
+            await update.message.reply_text(
+                "❌ Товар не найден",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
+                ]])
+            )
+            return PRODUCTS_MENU
+        
+        product_name = result[0]
+        cursor.execute("UPDATE products SET price = ? WHERE id = ?", (price, product_id))
     
     await update.message.reply_text(
         f"✅ Цена товара '{product_name}' обновлена до {price} руб",
