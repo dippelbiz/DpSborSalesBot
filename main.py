@@ -43,6 +43,7 @@ from handlers.admin.orders import admin_orders_conv
 from handlers.admin.payments import admin_payments_conv
 from handlers.admin.reports import admin_reports_conv
 from handlers.admin.settings import admin_settings_conv
+from handlers.admin.sellers import admin_sellers_handler
 from handlers.admin.backup import manual_backup
 from handlers.admin.restore import restore_conv
 
@@ -187,6 +188,7 @@ async def run_webhook():
     application.add_handler(admin_payments_conv)
     application.add_handler(admin_reports_conv)
     application.add_handler(admin_settings_conv)
+    application.add_handler(admin_sellers_handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Устанавливаем вебхук
@@ -253,6 +255,7 @@ def main():
         application.add_handler(admin_payments_conv)
         application.add_handler(admin_reports_conv)
         application.add_handler(admin_settings_conv)
+        application.add_handler(admin_sellers_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("✅ Бот запущен и готов к работе (polling)")
