@@ -17,4 +17,4 @@ async def admin_reports_start(update: Update, context):
         reply_markup=get_main_menu()
     )
 
-admin_reports_handler = MessageHandler(filters.Regex('^Отчеты$'), admin_reports_start)
+admin_reports_conv = MessageHandler(filters.Regex('^Отчеты$'), admin_reports_start)
