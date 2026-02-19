@@ -46,6 +46,7 @@ from handlers.admin.settings import admin_settings_conv
 from handlers.admin.sellers import admin_sellers_handler
 from handlers.admin.backup import manual_backup
 from handlers.admin.restore import restore_conv
+from handlers.admin.add_test_seller import add_seller_handler
 
 # Настройка логирования
 logging.basicConfig(
@@ -178,6 +179,7 @@ async def run_webhook():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu_handler))
     application.add_handler(CommandHandler("backup", manual_backup))
+    application.add_handler(CommandHandler("add_seller", add_seller_handler))
     application.add_handler(restore_conv)
     application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
     application.add_handler(orders_conv)
@@ -245,6 +247,7 @@ def main():
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("menu", menu_handler))
         application.add_handler(CommandHandler("backup", manual_backup))
+        application.add_handler(CommandHandler("add_seller", add_seller_handler))
         application.add_handler(restore_conv)
         application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
         application.add_handler(orders_conv)
