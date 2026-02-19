@@ -27,7 +27,7 @@ from config import config
 from database import db
 from backup import backup
 from backup_decorator import send_backup_to_admin
-from keyboards import get_main_menu
+from keyboards import get_main_menu, get_admin_menu
 
 # Общие обработчики
 from handlers.common import start, menu_handler, handle_message
