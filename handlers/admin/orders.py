@@ -17,4 +17,4 @@ async def admin_orders_start(update: Update, context):
         reply_markup=get_main_menu()
     )
 
-admin_orders_handler = MessageHandler(filters.Regex('^Управление поставками$'), admin_orders_start)
+admin_orders_conv = MessageHandler(filters.Regex('^Управление поставками$'), admin_orders_start)
