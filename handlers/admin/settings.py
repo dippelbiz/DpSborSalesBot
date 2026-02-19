@@ -68,7 +68,7 @@ async def settings_sellers(update: Update, context):
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await query.edit_message_text(text, reply_markup=reply_markup)
-    return MAIN_MENU
+    return ADD_SELLER_CODE  # ← ИСПРАВЛЕНО: было MAIN_MENU, стало ADD_SELLER_CODE
 
 async def seller_add_start(update: Update, context):
     """Начало добавления продавца - шаг 1: код"""
