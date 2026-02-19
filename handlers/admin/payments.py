@@ -16,5 +16,4 @@ async def admin_payments_start(update: Update, context):
         "💰 Управление платежами\n\nРаздел в разработке",
         reply_markup=get_main_menu()
     )
-
-admin_payments_handler = MessageHandler(filters.Regex('^Управление платежами$'), admin_payments_start)
+admin_payments_conv = MessageHandler(filters.Regex('^Управление платежами$'), admin_payments_start)
