@@ -6,10 +6,10 @@
 """
 
 import logging
-import json  # ← ЭТО ДОБАВИТЬ (1)
-import sqlite3  # ← ЭТО ДОБАВИТЬ (2)
-import io  # ← ЭТО ДОБАВИТЬ (3)
-from datetime import datetime  # ← ЭТО МОЖЕТ УЖЕ БЫТЬ
+import json
+import sqlite3
+import io
+from datetime import datetime
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
@@ -17,9 +17,9 @@ from telegram.ext import ConversationHandler
 
 from config import config
 from database import db
-from backup import backup  # ← ЭТО УЖЕ ДОЛЖНО БЫТЬ
-from backup_decorator import send_backup_to_admin  # ← ЭТО УЖЕ ДОЛЖНО БЫТЬ
-from keyboards import get_main_menu  # ← ЭТО УЖЕ ДОЛЖНО БЫТЬ
+from backup import backup
+from backup_decorator import send_backup_to_admin
+from keyboards import get_main_menu
 
 # Общие обработчики
 from handlers.common import start, menu_handler, handle_message
@@ -46,7 +46,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # === ЭКСТРЕННОЕ ВОССТАНОВЛЕНИЕ ===
-# Добавьте эту функцию ПОСЛЕ импортов, НО ПЕРЕД main()
 async def emergency_restore(update: Update, context):
     """Экстренное восстановление из последнего бэкапа в чате"""
     user_id = update.effective_user.id
@@ -164,10 +163,8 @@ def main():
     application.add_handler(CommandHandler("backup", manual_backup))
     application.add_handler(restore_conv)
     
-    # === ЭКСТРЕННОЕ ВОССТАНОВЛЕНИЕ ===
-    # Этот обработчик должен быть ПЕРЕД общими обработчиками
+    # Экстренное восстановление (обработка файлов)
     application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
-    # === КОНЕЦ БЛОКА ===
     
     # Обработчики продавцов
     application.add_handler(orders_conv)  # Заявки на поставку
