@@ -2,18 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-Основной файл бота для складского учета
+Основной файл бота для складского учета - версия с вебхуками для Render
 """
 
 import logging
 import json
 import sqlite3
 import io
+import os
+import asyncio
 from datetime import datetime
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from telegram.ext import ConversationHandler
+
+# Добавляем импорты для веб-сервера
+from starlette.applications import Starlette
+from starlette.responses import Response, PlainTextResponse
+from starlette.routing import Route
+import uvicorn
 
 from config import config
 from database import db
@@ -33,7 +41,7 @@ from handlers.seller.stock import stock_handler
 # Обработчики администратора
 from handlers.admin.orders import admin_orders_conv
 from handlers.admin.payments import admin_payments_conv
-from handlers.admin.reports import admin_reports_conv  # ← ИЗМЕНЕНО: было handler, стало conv
+from handlers.admin.reports import admin_reports_conv
 from handlers.admin.settings import admin_settings_conv
 from handlers.admin.backup import manual_backup
 from handlers.admin.restore import restore_conv
@@ -148,42 +156,107 @@ async def emergency_restore(update: Update, context):
         await update.message.reply_text(f"❌ Ошибка восстановления: {str(e)}")
 # === КОНЕЦ БЛОКА ЭКСТРЕННОГО ВОССТАНОВЛЕНИЯ ===
 
-def main():
-    """Запуск бота"""
-    logger.info("Запуск бота...")
+# === ФУНКЦИЯ ДЛЯ ЗАПУСКА С ВЕБХУКАМИ ===
+async def run_webhook():
+    """Запуск бота с вебхуками для Render"""
+    logger.info("Запуск бота с вебхуками...")
     
-    # Создаем приложение
-    application = Application.builder().token(config.BOT_TOKEN).build()
+    # Получаем переменные окружения
+    TOKEN = config.BOT_TOKEN
+    URL = os.environ.get("RENDER_EXTERNAL_URL")  # Render сам подставляет этот URL
+    PORT = int(os.environ.get("PORT", 10000))  # Render использует порт 10000
     
-    # Базовые команды
+    if not URL:
+        logger.error("RENDER_EXTERNAL_URL не установлен!")
+        return
+    
+    # Создаем приложение без встроенного Updater
+    application = Application.builder().token(TOKEN).updater(None).build()
+    
+    # Добавляем все обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu_handler))
-    
-    # Команды для бэкапов (только для админов)
     application.add_handler(CommandHandler("backup", manual_backup))
     application.add_handler(restore_conv)
-    
-    # Экстренное восстановление (обработка файлов)
     application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
-    
-    # Обработчики продавцов
-    application.add_handler(orders_conv)  # Заявки на поставку
-    application.add_handler(shipments_handler)  # Отгруженные поставки
-    application.add_handler(sales_conv)  # Реализовано
+    application.add_handler(orders_conv)
+    application.add_handler(shipments_handler)
+    application.add_handler(sales_conv)
     application.add_handler(MessageHandler(filters.Regex('^(Остатки)$'), stock_handler))
-    
-    # Обработчики администратора
     application.add_handler(admin_orders_conv)
     application.add_handler(admin_payments_conv)
-    application.add_handler(admin_reports_conv)  # ← ИЗМЕНЕНО: было handler, стало conv
+    application.add_handler(admin_reports_conv)
     application.add_handler(admin_settings_conv)
-    
-    # Обработчик всех остальных сообщений (должен быть ПОСЛЕДНИМ)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Запуск бота
-    logger.info("Бот запущен и готов к работе")
-    application.run_polling()
+    # Устанавливаем вебхук
+    webhook_url = f"{URL}/telegram"
+    await application.bot.set_webhook(webhook_url, allowed_updates=Update.ALL_TYPES)
+    logger.info(f"✅ Вебхук установлен на {webhook_url}")
+    
+    # Создаем Starlette приложение для обработки вебхуков
+    async def telegram(request):
+        """Обработка входящих вебхуков от Telegram"""
+        update_data = await request.json()
+        update = Update.de_json(update_data, application.bot)
+        await application.update_queue.put(update)
+        return Response()
+    
+    async def healthcheck(request):
+        """Эндпоинт для проверки здоровья Render"""
+        return PlainTextResponse("OK")
+    
+    starlette_app = Starlette(routes=[
+        Route("/telegram", telegram, methods=["POST"]),
+        Route("/healthcheck", healthcheck, methods=["GET"]),
+    ])
+    
+    # Запускаем веб-сервер
+    logger.info(f"Запуск веб-сервера на порту {PORT}")
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app=starlette_app,
+            host="0.0.0.0",
+            port=PORT,
+            log_level="info"
+        )
+    )
+    
+    async with application:
+        await application.start()
+        await server.serve()
+        await application.stop()
+# === КОНЕЦ ФУНКЦИИ ===
+
+def main():
+    """Запуск бота"""
+    # На Render используем вебхуки
+    if os.environ.get("RENDER"):
+        logger.info("Запуск на Render, используем вебхуки")
+        asyncio.run(run_webhook())
+    else:
+        # Локально используем polling
+        logger.info("Запуск бота локально (polling)...")
+        application = Application.builder().token(config.BOT_TOKEN).build()
+        
+        # Добавляем все обработчики
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("menu", menu_handler))
+        application.add_handler(CommandHandler("backup", manual_backup))
+        application.add_handler(restore_conv)
+        application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
+        application.add_handler(orders_conv)
+        application.add_handler(shipments_handler)
+        application.add_handler(sales_conv)
+        application.add_handler(MessageHandler(filters.Regex('^(Остатки)$'), stock_handler))
+        application.add_handler(admin_orders_conv)
+        application.add_handler(admin_payments_conv)
+        application.add_handler(admin_reports_conv)
+        application.add_handler(admin_settings_conv)
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        
+        logger.info("✅ Бот запущен и готов к работе (polling)")
+        application.run_polling()
 
 if __name__ == '__main__':
     main()
