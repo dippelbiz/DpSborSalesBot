@@ -15,7 +15,7 @@ async def add_test_seller(update: Update, context):
         await update.message.reply_text("⛔ Доступ запрещен")
         return
     
-    # Проверяем, передан ли аргумент (Telegram ID продавца)
+    # Проверяем, передан ли аргумент
     if not context.args:
         await update.message.reply_text(
             "❌ Использование: /add_seller <telegram_id> <код> <имя>\n"
@@ -47,12 +47,13 @@ async def add_test_seller(update: Update, context):
                 VALUES (?, ?, ?, 1)
             """, (seller_code, seller_name, seller_tg_id))
             
+            # Получаем ID нового продавца
+            cursor.execute("SELECT id FROM sellers WHERE seller_code = ?", (seller_code,))
+            seller_db_id = cursor.fetchone()[0]
+            
             # Создаем записи в seller_products для всех товаров
             cursor.execute("SELECT id FROM products WHERE is_active = 1")
             products = cursor.fetchall()
-            
-            cursor.execute("SELECT id FROM sellers WHERE seller_code = ?", (seller_code,))
-            seller_db_id = cursor.fetchone()[0]
             
             for product in products:
                 cursor.execute("""
@@ -84,5 +85,5 @@ async def add_test_seller(update: Update, context):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка: {e}")
 
-# Добавляем команду в main.py
+# ВАЖНО: создаем обработчик
 add_seller_handler = CommandHandler("add_seller", add_test_seller)
