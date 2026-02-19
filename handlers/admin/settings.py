@@ -17,4 +17,4 @@ async def admin_settings_start(update: Update, context):
         reply_markup=get_main_menu()
     )
 
-admin_settings_handler = MessageHandler(filters.Regex('^Настройки$'), admin_settings_start)
+admin_settings_conv = MessageHandler(filters.Regex('^Настройки$'), admin_settings_start)
