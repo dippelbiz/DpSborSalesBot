@@ -30,7 +30,7 @@ from backup_decorator import send_backup_to_admin
 from keyboards import get_main_menu, get_admin_menu
 
 # Общие обработчики
-from handlers.common import start, menu_handler, handle_message
+from handlers.common import start, menu_handler, handle_message, activation_conv
 
 # Обработчики продавцов
 from handlers.seller.orders import orders_conv
@@ -181,6 +181,7 @@ async def run_webhook():
     application.add_handler(CommandHandler("backup", manual_backup))
     application.add_handler(CommandHandler("add_seller", add_seller_handler))
     application.add_handler(restore_conv)
+    application.add_handler(activation_conv)
     application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
     application.add_handler(orders_conv)
     application.add_handler(shipments_handler)
@@ -249,6 +250,7 @@ def main():
         application.add_handler(CommandHandler("backup", manual_backup))
         application.add_handler(CommandHandler("add_seller", add_seller_handler))
         application.add_handler(restore_conv)
+        application.add_handler(activation_conv)
         application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
         application.add_handler(orders_conv)
         application.add_handler(shipments_handler)
