@@ -1,20 +1,262 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from telegram import Update
-from telegram.ext import MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from database import db
 from config import config
-from keyboards import get_main_menu
+from keyboards import get_admin_menu
+from backup_decorator import send_backup_to_admin
+
+# Состояния разговора
+SELECTING_ORDER, CONFIRMING_SHIPMENT = range(2)
 
 async def admin_orders_start(update: Update, context):
+    """Главное меню управления поставками"""
     user_id = update.effective_user.id
+    
     if user_id not in config.ADMIN_IDS:
         await update.message.reply_text("⛔ Доступ запрещен")
-        return
+        return ConversationHandler.END
+    
+    # Получаем статистику
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Новые заявки
+        cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'new'")
+        new_count = cursor.fetchone()[0]
+        
+        # В пути
+        cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'shipped'")
+        shipped_count = cursor.fetchone()[0]
+        
+        # Завершенные сегодня
+        cursor.execute("""
+            SELECT COUNT(*) FROM orders 
+            WHERE status = 'completed' AND date(completed_at) = date('now')
+        """)
+        completed_today = cursor.fetchone()[0]
+    
+    keyboard = [
+        [InlineKeyboardButton(f"🟡 Новые заявки ({new_count})", callback_data="admin_orders_new")],
+        [InlineKeyboardButton(f"🔵 В пути ({shipped_count})", callback_data="admin_orders_shipped")],
+        [InlineKeyboardButton("📋 Все заявки", callback_data="admin_orders_all")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "📦 Управление поставками\n\nРаздел в разработке",
-        reply_markup=get_main_menu()
+        f"📦 Управление поставками\n\n"
+        f"🟡 Новых: {new_count}\n"
+        f"🔵 В пути: {shipped_count}\n"
+        f"🟢 Завершено сегодня: {completed_today}\n\n"
+        f"Выберите действие:",
+        reply_markup=reply_markup
     )
+    
+    return SELECTING_ORDER
 
-admin_orders_conv = MessageHandler(filters.Regex('^Управление поставками$'), admin_orders_start)
+async def admin_orders_new(update: Update, context):
+    """Просмотр новых заявок"""
+    query = update.callback_query
+    await query.answer()
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT o.id, o.order_number, o.seller_code, o.created_at,
+                   GROUP_CONCAT(p.product_name || ' ' || oi.quantity_ordered || ' упак') as items,
+                   SUM(oi.quantity_ordered * oi.price_at_order) as total
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            JOIN products p ON oi.product_id = p.id
+            WHERE o.status = 'new'
+            GROUP BY o.id
+            ORDER BY o.created_at ASC
+        """)
+        orders = cursor.fetchall()
+    
+    if not orders:
+        await query.edit_message_text(
+            "📭 Нет новых заявок",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back_to_menu")
+            ]])
+        )
+        return SELECTING_ORDER
+    
+    text = "🟡 Новые заявки:\n\n"
+    keyboard = []
+    
+    for order in orders:
+        text += f"📋 {order['order_number']} ({order['seller_code']})\n"
+        text += f"   {order['items']}\n"
+        text += f"   Сумма: {order['total']} руб\n"
+        text += f"   от {order['created_at'][:16]}\n\n"
+        keyboard.append([InlineKeyboardButton(
+            f"✅ {order['order_number']}", 
+            callback_data=f"admin_order_view_{order['id']}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back_to_menu")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    
+    return SELECTING_ORDER
+
+async def admin_order_view(update: Update, context):
+    """Просмотр конкретной заявки"""
+    query = update.callback_query
+    await query.answer()
+    
+    order_id = int(query.data.replace('admin_order_view_', ''))
+    context.user_data['current_order_id'] = order_id
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT o.*, s.full_name 
+            FROM orders o
+            JOIN sellers s ON o.seller_id = s.id
+            WHERE o.id = ?
+        """, (order_id,))
+        order = cursor.fetchone()
+        
+        cursor.execute("""
+            SELECT p.product_name, oi.quantity_ordered, oi.price_at_order,
+                   oi.quantity_ordered * oi.price_at_order as total
+            FROM order_items oi
+            JOIN products p ON oi.product_id = p.id
+            WHERE oi.order_id = ?
+        """, (order_id,))
+        items = cursor.fetchall()
+    
+    status_emoji = {
+        'new': '🟡',
+        'shipped': '🔵',
+        'completed': '🟢',
+        'cancelled': '⚫'
+    }.get(order['status'], '⚪')
+    
+    text = f"{status_emoji} Заявка: {order['order_number']}\n"
+    text += f"Продавец: {order['seller_code']} - {order['full_name']}\n"
+    text += f"Дата: {order['created_at'][:16]}\n"
+    text += f"Статус: {order['status']}\n\n"
+    text += "Товары:\n"
+    
+    for item in items:
+        text += f"• {item['product_name']}: {item['quantity_ordered']} упак × {item['price_at_order']} = {item['total']} руб\n"
+    
+    keyboard = []
+    
+    if order['status'] == 'new':
+        keyboard.append([InlineKeyboardButton("✅ Подтвердить отгрузку", callback_data=f"admin_order_ship_{order_id}")])
+        keyboard.append([InlineKeyboardButton("❌ Отменить заявку", callback_data=f"admin_order_cancel_{order_id}")])
+    elif order['status'] == 'shipped':
+        keyboard.append([InlineKeyboardButton("📦 Отметить как получено", callback_data=f"admin_order_complete_{order_id}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back_to_new")])
+    
+    await query.edit_message_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    
+    return SELECTING_ORDER
+
+@send_backup_to_admin("подтверждение отгрузки")
+async def admin_order_ship(update: Update, context):
+    """Подтверждение отгрузки заявки"""
+    query = update.callback_query
+    await query.answer()
+    
+    order_id = int(query.data.replace('admin_order_ship_', ''))
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE orders 
+            SET status = 'shipped', shipped_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (order_id,))
+    
+    await query.edit_message_text(
+        "✅ Отгрузка подтверждена!\n\n"
+        "Заявка переведена в статус 'В пути'.\n"
+        "Продавец получит уведомление.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 К заявкам", callback_data="admin_orders_back_to_menu")
+        ]])
+    )
+    
+    return SELECTING_ORDER
+
+async def admin_orders_back_to_menu(update: Update, context):
+    """Возврат в главное меню поставок"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Перезапускаем админское меню
+    user_id = update.effective_user.id
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'new'")
+        new_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'shipped'")
+        shipped_count = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM orders 
+            WHERE status = 'completed' AND date(completed_at) = date('now')
+        """)
+        completed_today = cursor.fetchone()[0]
+    
+    keyboard = [
+        [InlineKeyboardButton(f"🟡 Новые заявки ({new_count})", callback_data="admin_orders_new")],
+        [InlineKeyboardButton(f"🔵 В пути ({shipped_count})", callback_data="admin_orders_shipped")],
+        [InlineKeyboardButton("📋 Все заявки", callback_data="admin_orders_all")],
+        [InlineKeyboardButton("🔙 В админ-меню", callback_data="admin_orders_exit")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"📦 Управление поставками\n\n"
+        f"🟡 Новых: {new_count}\n"
+        f"🔵 В пути: {shipped_count}\n"
+        f"🟢 Завершено сегодня: {completed_today}\n\n"
+        f"Выберите действие:",
+        reply_markup=reply_markup
+    )
+    
+    return SELECTING_ORDER
+
+async def admin_orders_exit(update: Update, context):
+    """Выход в главное админское меню"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "Выход в главное меню",
+        reply_markup=get_admin_menu()
+    )
+    
+    return ConversationHandler.END
+
+# Обработчик разговора для управления поставками
+admin_orders_conv = ConversationHandler(
+    entry_points=[MessageHandler(filters.Regex('^📦 Управление поставками$'), admin_orders_start)],
+    states={
+        SELECTING_ORDER: [
+            CallbackQueryHandler(admin_orders_new, pattern='^admin_orders_new$'),
+            CallbackQueryHandler(admin_orders_back_to_menu, pattern='^admin_orders_back_to_menu$'),
+            CallbackQueryHandler(admin_orders_exit, pattern='^admin_orders_exit$'),
+            CallbackQueryHandler(admin_order_view, pattern='^admin_order_view_'),
+            CallbackQueryHandler(admin_order_ship, pattern='^admin_order_ship_'),
+        ]
+    },
+    fallbacks=[CommandHandler('cancel', admin_orders_exit)]
+)
