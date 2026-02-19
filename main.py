@@ -33,7 +33,7 @@ from handlers.seller.stock import stock_handler
 # Обработчики администратора
 from handlers.admin.orders import admin_orders_conv
 from handlers.admin.payments import admin_payments_conv
-from handlers.admin.reports import admin_reports_handler
+from handlers.admin.reports import admin_reports_conv  # ← ИЗМЕНЕНО: было handler, стало conv
 from handlers.admin.settings import admin_settings_conv
 from handlers.admin.backup import manual_backup
 from handlers.admin.restore import restore_conv
@@ -175,7 +175,7 @@ def main():
     # Обработчики администратора
     application.add_handler(admin_orders_conv)
     application.add_handler(admin_payments_conv)
-    application.add_handler(admin_reports_handler)
+    application.add_handler(admin_reports_conv)  # ← ИЗМЕНЕНО: было handler, стало conv
     application.add_handler(admin_settings_conv)
     
     # Обработчик всех остальных сообщений (должен быть ПОСЛЕДНИМ)
