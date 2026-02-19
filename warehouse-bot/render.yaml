@@ -1,0 +1,21 @@
+services:
+  - type: worker
+    name: warehouse-bot
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_IDS
+        value: "123456789,987654321"
+      - key: DATABASE_PATH
+        value: "/data/warehouse_bot.db"
+      - key: DEBUG
+        value: "false"
+    disk:
+      name: warehouse-data
+      mountPath: /data
+      sizeGB: 1
