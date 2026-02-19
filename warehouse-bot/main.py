@@ -6,11 +6,20 @@
 """
 
 import logging
+import json  # ← ЭТО ДОБАВИТЬ (1)
+import sqlite3  # ← ЭТО ДОБАВИТЬ (2)
+import io  # ← ЭТО ДОБАВИТЬ (3)
+from datetime import datetime  # ← ЭТО МОЖЕТ УЖЕ БЫТЬ
+
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from telegram.ext import ConversationHandler
 
 from config import config
 from database import db
+from backup import backup  # ← ЭТО УЖЕ ДОЛЖНО БЫТЬ
+from backup_decorator import send_backup_to_admin  # ← ЭТО УЖЕ ДОЛЖНО БЫТЬ
+from keyboards import get_main_menu  # ← ЭТО УЖЕ ДОЛЖНО БЫТЬ
 
 # Общие обработчики
 from handlers.common import start, menu_handler, handle_message
@@ -36,6 +45,110 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# === ЭКСТРЕННОЕ ВОССТАНОВЛЕНИЕ ===
+# Добавьте эту функцию ПОСЛЕ импортов, НО ПЕРЕД main()
+async def emergency_restore(update: Update, context):
+    """Экстренное восстановление из последнего бэкапа в чате"""
+    user_id = update.effective_user.id
+    
+    # Проверка прав администратора
+    if user_id not in config.ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещен")
+        return
+    
+    # Проверяем, что сообщение - это документ
+    if not update.message.document:
+        await update.message.reply_text(
+            "❌ Отправьте JSON-файл с бэкапом"
+        )
+        return
+    
+    document = update.message.document
+    
+    # Проверяем расширение файла
+    if not document.file_name.endswith('.json'):
+        await update.message.reply_text(
+            "❌ Неверный формат. Отправьте JSON-файл."
+        )
+        return
+    
+    await update.message.reply_text("🔄 Восстановление...")
+    
+    try:
+        # Скачиваем файл
+        file = await document.get_file()
+        file_content = await file.download_as_bytearray()
+        
+        # Парсим JSON
+        data = json.loads(file_content.decode('utf-8'))
+        
+        # Создаем бэкап текущей БД
+        current_backup = backup.create_backup_json()
+        current_filename = backup.get_backup_filename("before_emergency_restore")
+        
+        # Отправляем бэкап текущей БД
+        await update.message.reply_document(
+            document=io.BytesIO(current_backup.encode('utf-8')),
+            filename=current_filename,
+            caption="📦 Бэкап перед экстренным восстановлением"
+        )
+        
+        # Восстанавливаем
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        cursor = conn.cursor()
+        
+        # Отключаем проверку внешних ключей
+        cursor.execute("PRAGMA foreign_keys = OFF")
+        
+        # Очищаем таблицы
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        
+        for table in tables:
+            table_name = table[0]
+            if table_name != 'sqlite_sequence':
+                cursor.execute(f"DELETE FROM {table_name}")
+        
+        # Вставляем данные из бэкапа
+        restored = 0
+        for table_name, rows in data.items():
+            if table_name != 'sqlite_sequence' and rows:
+                # Получаем список колонок из первой записи
+                columns = list(rows[0].keys())
+                placeholders = ','.join(['?'] * len(columns))
+                column_names = ','.join(columns)
+                
+                for row in rows:
+                    values = [row[col] for col in columns]
+                    cursor.execute(
+                        f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})",
+                        values
+                    )
+                    restored += 1
+        
+        # Включаем обратно проверку внешних ключей
+        cursor.execute("PRAGMA foreign_keys = ON")
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(
+            f"✅ Восстановлено {restored} записей из {document.file_name}"
+        )
+        
+        # Логируем действие
+        db.log_action(
+            user_id=user_id,
+            user_role="admin",
+            action="emergency_restore",
+            details=f"Восстановлено из {document.file_name}, записей: {restored}"
+        )
+        
+    except json.JSONDecodeError:
+        await update.message.reply_text("❌ Ошибка: файл не является корректным JSON")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка восстановления: {str(e)}")
+# === КОНЕЦ БЛОКА ЭКСТРЕННОГО ВОССТАНОВЛЕНИЯ ===
+
 def main():
     """Запуск бота"""
     logger.info("Запуск бота...")
@@ -51,6 +164,11 @@ def main():
     application.add_handler(CommandHandler("backup", manual_backup))
     application.add_handler(restore_conv)
     
+    # === ЭКСТРЕННОЕ ВОССТАНОВЛЕНИЕ ===
+    # Этот обработчик должен быть ПЕРЕД общими обработчиками
+    application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
+    # === КОНЕЦ БЛОКА ===
+    
     # Обработчики продавцов
     application.add_handler(orders_conv)  # Заявки на поставку
     application.add_handler(shipments_handler)  # Отгруженные поставки
@@ -63,7 +181,7 @@ def main():
     application.add_handler(admin_reports_handler)
     application.add_handler(admin_settings_conv)
     
-    # Обработчик всех остальных сообщений
+    # Обработчик всех остальных сообщений (должен быть ПОСЛЕДНИМ)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Запуск бота
