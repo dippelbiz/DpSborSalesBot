@@ -36,19 +36,15 @@ async def orders_start(update: Update, context):
         )
         return ConversationHandler.END
 
-    # Сохраняем данные продавца
     context.user_data['seller_id'] = seller['id']
     context.user_data['seller_code'] = seller['seller_code']
-    # Инициализируем корзину (пустой словарь)
     context.user_data['cart'] = {}
 
-    # Показываем меню выбора товара
     await show_product_selection(update, context)
     return SELECTING_PRODUCT
 
 async def show_product_selection(update: Update, context):
     """Отправляет сообщение с инлайн-кнопками товаров."""
-    # Получаем список активных товаров
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, product_name, price FROM products WHERE is_active = 1 ORDER BY product_name")
@@ -76,10 +72,12 @@ async def show_product_selection(update: Update, context):
         keyboard.append(row)
 
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-
     reply_markup = InlineKeyboardMarkup(keyboard)
-    text = "📦 Выберите товар для добавления в заявку:"
-    await update.message.reply_text(text, reply_markup=reply_markup)
+
+    await update.message.reply_text(
+        "📦 Выберите товар для добавления в заявку:",
+        reply_markup=reply_markup
+    )
 
 async def product_selected(update: Update, context):
     """Обработка выбора товара (запрос количества)."""
@@ -88,7 +86,6 @@ async def product_selected(update: Update, context):
     data = query.data
 
     if data == "cancel":
-        # Отмена на этапе выбора товара – выходим
         await query.edit_message_text("❌ Создание заявки отменено.")
         await context.bot.send_message(
             chat_id=update.effective_user.id,
@@ -100,7 +97,6 @@ async def product_selected(update: Update, context):
     product_id = int(data.replace('product_', ''))
     context.user_data['selected_product_id'] = product_id
 
-    # Получаем информацию о товаре для отображения
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT product_name, price FROM products WHERE id = ?", (product_id,))
@@ -110,11 +106,9 @@ async def product_selected(update: Update, context):
         await query.edit_message_text("❌ Товар не найден.")
         return ConversationHandler.END
 
-    # Запоминаем название и цену для дальнейшего использования
     context.user_data['selected_product_name'] = product['product_name']
     context.user_data['selected_product_price'] = product['price']
 
-    # Убираем инлайн-кнопки и просим ввести количество
     await query.edit_message_text(
         f"Товар: {product['product_name']}\n"
         f"Цена: {product['price']} руб/упак\n\n"
@@ -128,7 +122,6 @@ async def quantity_entered(update: Update, context):
     text = update.message.text
 
     if text == '🔙 Назад':
-        # Возвращаемся к выбору товара
         await show_product_selection(update, context)
         return SELECTING_PRODUCT
 
@@ -140,7 +133,6 @@ async def quantity_entered(update: Update, context):
         context.user_data.clear()
         return ConversationHandler.END
 
-    # Парсим число
     try:
         qty = int(text)
         if qty <= 0:
@@ -153,15 +145,12 @@ async def quantity_entered(update: Update, context):
         )
         return ENTERING_QUANTITY
 
-    # Получаем данные выбранного товара
     prod_id = context.user_data['selected_product_id']
     prod_name = context.user_data['selected_product_name']
     prod_price = context.user_data['selected_product_price']
 
-    # Обновляем корзину
     cart = context.user_data.get('cart', {})
     if prod_id in cart:
-        # Товар уже есть – суммируем количество
         cart[prod_id]['qty'] += qty
     else:
         cart[prod_id] = {
@@ -171,7 +160,6 @@ async def quantity_entered(update: Update, context):
         }
     context.user_data['cart'] = cart
 
-    # Показываем сводку корзины
     await show_cart_summary(update, context)
     return CONFIRMING_CART
 
@@ -179,7 +167,6 @@ async def show_cart_summary(update: Update, context):
     """Отображает текущее содержимое корзины и кнопки действий."""
     cart = context.user_data.get('cart', {})
     if not cart:
-        # Если корзина пуста (не должно происходить)
         await show_product_selection(update, context)
         return SELECTING_PRODUCT
 
@@ -212,11 +199,40 @@ async def show_cart_summary(update: Update, context):
         )
 
 async def add_more(update: Update, context):
-    """Возврат к выбору товара для добавления."""
+    """Возврат к выбору товара для добавления (редактирует текущее сообщение)."""
     query = update.callback_query
     await query.answer()
-    # Показываем меню выбора товара
-    await show_product_selection(update, context)
+
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, product_name, price FROM products WHERE is_active = 1 ORDER BY product_name")
+        products = cursor.fetchall()
+
+    if not products:
+        await query.edit_message_text("❌ Нет доступных товаров.")
+        return SELECTING_PRODUCT
+
+    keyboard = []
+    row = []
+    for i, prod in enumerate(products):
+        button = InlineKeyboardButton(
+            f"{prod['product_name']} ({prod['price']} руб)",
+            callback_data=f"product_{prod['id']}"
+        )
+        row.append(button)
+        if (i + 1) % 2 == 0:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+
+    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await query.edit_message_text(
+        "📦 Выберите товар для добавления в заявку:",
+        reply_markup=reply_markup
+    )
     return SELECTING_PRODUCT
 
 @send_backup_to_admin("создание заявки на поставку")
@@ -238,7 +254,6 @@ async def confirm_order(update: Update, context):
 
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Получаем порядковый номер заявки продавца за сегодня
         cursor.execute("""
             SELECT COUNT(*) FROM orders
             WHERE seller_code = ? AND date(created_at) = date('now')
@@ -246,21 +261,18 @@ async def confirm_order(update: Update, context):
         count = cursor.fetchone()[0] + 1
         order_number = f"{seller_code}-{date_str}-{count:03d}"
 
-        # Создаём заявку
         cursor.execute("""
             INSERT INTO orders (order_number, seller_id, seller_code, status)
             VALUES (?, ?, ?, 'new')
         """, (order_number, seller_id, seller_code))
         order_id = cursor.lastrowid
 
-        # Добавляем каждую позицию
         for prod_id, item in cart.items():
             cursor.execute("""
                 INSERT INTO order_items (order_id, product_id, quantity_ordered, price_at_order)
                 VALUES (?, ?, ?, ?)
             """, (order_id, prod_id, item['qty'], item['price']))
 
-    # Сообщение об успехе
     await query.edit_message_text(
         f"✅ Заявка № {order_number} успешно создана!",
         reply_markup=None
@@ -339,7 +351,10 @@ async def my_orders(update: Update, context):
 
     await update.message.reply_text(text, reply_markup=get_main_menu())
 
-# ConversationHandler для заявок
+# --- Обработчики для регистрации в main.py ---
+my_orders_handler = MessageHandler(filters.Regex('^📋 Мои заявки$'), my_orders)
+
+# ConversationHandler для создания заявок
 orders_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex('^📦 Заявка на поставку$'), orders_start)],
     states={
