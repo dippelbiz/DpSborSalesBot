@@ -33,7 +33,7 @@ from keyboards import get_main_menu, get_admin_menu
 from handlers.common import start, menu_handler, handle_message, activation_conv
 
 # Обработчики продавцов
-from handlers.seller.orders import orders_conv
+from handlers.seller.orders import orders_conv, my_orders_handler  # добавлен my_orders_handler
 from handlers.seller.shipments import shipments_handler
 from handlers.seller.sales import sales_conv
 from handlers.seller.stock import stock_handler
@@ -174,22 +174,32 @@ async def run_webhook():
     # Создаем приложение без встроенного Updater
     application = Application.builder().token(TOKEN).updater(None).build()
     
-    # Добавляем все обработчики
+    # Порядок добавления обработчиков важен!
+    # Сначала команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu_handler))
     application.add_handler(CommandHandler("backup", manual_backup))
     application.add_handler(CommandHandler("add_seller", add_seller_handler))
     application.add_handler(restore_conv)
     application.add_handler(activation_conv)
+    
+    # Экстренное восстановление (обработка файлов)
     application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
-    application.add_handler(orders_conv)
-    application.add_handler(shipments_handler)
-    application.add_handler(sales_conv)
+    
+    # ConversationHandler'ы для продавцов и админов (должны идти до простых MessageHandler)
+    application.add_handler(orders_conv)          # Создание заявок
+    application.add_handler(sales_conv)           # Продажи
+    application.add_handler(admin_orders_conv)    # Управление поставками
+    application.add_handler(admin_payments_conv)  # Управление платежами
+    application.add_handler(admin_reports_conv)   # Отчеты
+    application.add_handler(admin_settings_conv)  # Настройки
+    
+    # Обычные MessageHandler для конкретных кнопок
+    application.add_handler(shipments_handler)    # Отгруженные поставки
+    application.add_handler(my_orders_handler)    # Мои заявки
     application.add_handler(MessageHandler(filters.Regex('^(Остатки)$'), stock_handler))
-    application.add_handler(admin_orders_conv)
-    application.add_handler(admin_payments_conv)
-    application.add_handler(admin_reports_conv)
-    application.add_handler(admin_settings_conv)
+    
+    # Обработчик всех остальных сообщений (должен быть ПОСЛЕДНИМ)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Устанавливаем вебхук
@@ -242,7 +252,7 @@ def main():
         logger.info("Запуск бота локально (polling)...")
         application = Application.builder().token(config.BOT_TOKEN).build()
         
-        # Добавляем все обработчики
+        # Аналогичный порядок для polling
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("menu", menu_handler))
         application.add_handler(CommandHandler("backup", manual_backup))
@@ -251,13 +261,14 @@ def main():
         application.add_handler(activation_conv)
         application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
         application.add_handler(orders_conv)
-        application.add_handler(shipments_handler)
         application.add_handler(sales_conv)
-        application.add_handler(MessageHandler(filters.Regex('^(Остатки)$'), stock_handler))
         application.add_handler(admin_orders_conv)
         application.add_handler(admin_payments_conv)
         application.add_handler(admin_reports_conv)
         application.add_handler(admin_settings_conv)
+        application.add_handler(shipments_handler)
+        application.add_handler(my_orders_handler)
+        application.add_handler(MessageHandler(filters.Regex('^(Остатки)$'), stock_handler))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("✅ Бот запущен и готов к работе (polling)")
