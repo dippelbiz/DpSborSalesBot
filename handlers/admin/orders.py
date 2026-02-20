@@ -258,5 +258,6 @@ admin_orders_conv = ConversationHandler(
             CallbackQueryHandler(admin_order_ship, pattern='^admin_order_ship_'),
         ]
     },
-    fallbacks=[CommandHandler('cancel', admin_orders_exit)]
+    fallbacks=[CommandHandler('cancel', admin_orders_exit)],
+    allow_reentry=True  # ← ВАЖНО: добавляем эту строку
 )
