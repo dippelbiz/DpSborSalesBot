@@ -19,6 +19,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     user = update.effective_user
     
+    # Завершаем все активные диалоги
+    if context.user_data:
+        context.user_data.clear()
+    
     # Проверяем, является ли пользователь администратором
     if user.id in config.ADMIN_IDS:
         # Для админа специальное меню
@@ -160,6 +164,10 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
     
+    # ВАЖНО: Завершаем текущий диалог при нажатии на любую кнопку меню
+    if context.user_data:
+        context.user_data.clear()
+    
     # Проверка для админа
     is_admin = user_id in config.ADMIN_IDS
     
@@ -201,7 +209,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Нажмите 'Ввести код активации'",
                 reply_markup=ReplyKeyboardMarkup([['Ввести код активации']], resize_keyboard=True)
             )
-            return
+            return ConversationHandler.END
     
     # Обычные кнопки для активированных продавцов
     if text == '📦 Заявка на поставку':
@@ -235,7 +243,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Действие отменено.",
                 reply_markup=get_main_menu()
             )
-        return
+        return ConversationHandler.END
     
     else:
         if is_admin:
@@ -253,7 +261,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "Пожалуйста, используйте кнопки меню.",
                 reply_markup=ReplyKeyboardMarkup([['Ввести код активации']], resize_keyboard=True)
             )
-        return
+        return ConversationHandler.END
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик всех остальных сообщений"""
@@ -281,6 +289,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Я не понимаю эту команду. Пожалуйста, используйте кнопки меню.",
             reply_markup=ReplyKeyboardMarkup([['Ввести код активации']], resize_keyboard=True)
         )
+    
+    return ConversationHandler.END
 
 # Создаем ConversationHandler для активации
 activation_conv = ConversationHandler(
@@ -290,5 +300,6 @@ activation_conv = ConversationHandler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, activate_seller)
         ]
     },
-    fallbacks=[CommandHandler('cancel', cancel_activation)]
+    fallbacks=[CommandHandler('cancel', cancel_activation)],
+    allow_reentry=True  # Разрешаем прерывание
 )
