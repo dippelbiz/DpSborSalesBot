@@ -20,6 +20,8 @@ SELECTING_PRODUCT, ENTERING_QUANTITY, CONFIRMING = range(3)
 
 async def orders_start(update: Update, context):
     """Начало создания заявки"""
+    logger.info("orders_start called by user %s", update.effective_user.id)
+    
     # Проверяем, что пользователь - активированный продавец
     user_id = update.effective_user.id
     
@@ -82,6 +84,7 @@ async def get_products_keyboard():
 async def product_selected(update: Update, context):
     """Обработка выбора товара"""
     query = update.callback_query
+    logger.info("product_selected called with data: %s", query.data)
     await query.answer()
     
     if query.data == "cancel":
@@ -121,6 +124,7 @@ async def product_selected(update: Update, context):
 
 async def quantity_entered(update: Update, context):
     """Обработка ввода количества"""
+    logger.info("quantity_entered called with text: %s", update.message.text)
     text = update.message.text
     
     if text == '🔙 Назад':
@@ -173,6 +177,7 @@ async def quantity_entered(update: Update, context):
 async def confirm_order(update: Update, context):
     """Подтверждение создания заявки"""
     query = update.callback_query
+    logger.info("confirm_order called with data: %s", query.data)
     await query.answer()
     
     if query.data == 'confirm':
@@ -246,6 +251,7 @@ async def confirm_order(update: Update, context):
 async def my_orders(update: Update, context):
     """Просмотр своих заявок"""
     user_id = update.effective_user.id
+    logger.info("my_orders called by user %s", user_id)
     
     # Получаем seller_id
     with db.get_connection() as conn:
