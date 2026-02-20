@@ -48,6 +48,7 @@ async def sales_start(update: Update, context):
             ORDER BY p.product_name
         """, (seller_id,))
         products = cursor.fetchall()
+        logger.info("Found %d products with positive stock", len(products))
 
     if not products:
         await update.message.reply_text(
@@ -67,6 +68,7 @@ async def sales_start(update: Update, context):
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
+    logger.info("Sending keyboard with %d buttons", len(keyboard))
 
     await update.message.reply_text(
         "💰 Выберите товар, который продали:",
@@ -78,6 +80,7 @@ async def product_selected(update: Update, context):
     """Обработка выбора товара – запрашиваем количество."""
     query = update.callback_query
     await query.answer()
+    logger.info("product_selected called with data: %s", query.data)
 
     if query.data == "back_to_main":
         await query.edit_message_text("Выход в главное меню.")
@@ -123,6 +126,7 @@ async def product_selected(update: Update, context):
 async def quantity_entered(update: Update, context):
     """Обработка ввода количества – показываем подтверждение."""
     text = update.message.text
+    logger.info("quantity_entered: %s", text)
 
     if text == '🔙 Назад':
         # Возвращаемся к выбору товара
@@ -185,6 +189,7 @@ async def confirm_sale(update: Update, context):
     """Подтверждение продажи – списываем товар, увеличиваем pending, возвращаемся к списку."""
     query = update.callback_query
     await query.answer()
+    logger.info("confirm_sale called")
 
     seller_id = context.user_data['seller_id']
     product_id = context.user_data['selected_product_id']
@@ -247,6 +252,7 @@ async def change_qty(update: Update, context):
     """Изменить количество – возвращаемся к вводу."""
     query = update.callback_query
     await query.answer()
+    logger.info("change_qty called")
 
     await query.edit_message_text(
         f"Товар: {context.user_data['product_name']}\n"
@@ -261,6 +267,7 @@ async def cancel_sale(update: Update, context):
     """Отмена текущей продажи – возврат к выбору товара."""
     query = update.callback_query
     await query.answer()
+    logger.info("cancel_sale called")
 
     await query.edit_message_text("❌ Продажа отменена.")
     await sales_start(update, context)
