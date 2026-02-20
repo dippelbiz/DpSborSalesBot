@@ -453,5 +453,6 @@ admin_payments_conv = ConversationHandler(
             CallbackQueryHandler(payments_pending, pattern='^payments_pending$')
         ]
     },
-    fallbacks=[CommandHandler('cancel', exit_payments)]
+    fallbacks=[CommandHandler('cancel', exit_payments)],
+    allow_reentry=True  # ← ВАЖНО: добавляем эту строку
 )
