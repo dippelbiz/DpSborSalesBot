@@ -1317,5 +1317,6 @@ admin_settings_conv = ConversationHandler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, product_update_field)
         ]
     },
-    fallbacks=[CommandHandler('cancel', exit_settings)]
+    fallbacks=[CommandHandler('cancel', exit_settings)],
+    allow_reentry=True  # ← ВАЖНО: добавляем эту строку
 )
