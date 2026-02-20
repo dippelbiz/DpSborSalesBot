@@ -259,5 +259,7 @@ orders_conv = ConversationHandler(
             CallbackQueryHandler(confirm_order, pattern='^(confirm|edit|cancel)$')
         ]
     },
-    fallbacks=[CommandHandler('cancel', orders_start)]
+    fallbacks=[CommandHandler('cancel', orders_start)],
+    allow_reentry=True  # ← ВАЖНО: добавляем эту строку
+
 )
