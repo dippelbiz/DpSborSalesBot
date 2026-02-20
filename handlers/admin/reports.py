@@ -11,7 +11,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Состояния разговора (если нужны)
+# Состояния разговора
 MAIN_MENU, SELLER_REPORT, PERIOD_REPORT = range(3)
 
 async def reports_start(update: Update, context):
@@ -100,7 +100,6 @@ async def report_all_sellers(update: Update, context):
         text += f"   Долг: {seller['total_debt']} руб, к переводу: {seller['pending_amount']} руб\n"
         text += f"   Заявки: 🟡{seller['new_orders']} 🔵{seller['shipped_orders']} 🟢{seller['completed_orders']}\n\n"
     
-    # Кнопка для выбора конкретного продавца (можно добавить позже)
     keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -157,7 +156,11 @@ async def sales_period(update: Update, context):
         period_name = "эту неделю"
     elif period == 'month':
         start_date = today.replace(day=1)
-        end_date = (today.replace(day=28) + timedelta(days=4)).replace(day=1)  # первое число следующего месяца
+        # Первое число следующего месяца
+        if today.month == 12:
+            end_date = today.replace(year=today.year+1, month=1, day=1)
+        else:
+            end_date = today.replace(month=today.month+1, day=1)
         period_name = "этот месяц"
     else:  # all
         start_date = datetime(2000, 1, 1).date()
@@ -170,8 +173,8 @@ async def sales_period(update: Update, context):
         cursor.execute("""
             SELECT 
                 COUNT(*) as total_sales,
-                SUM(quantity) as total_quantity,
-                SUM(amount) as total_amount
+                COALESCE(SUM(quantity), 0) as total_quantity,
+                COALESCE(SUM(amount), 0) as total_amount
             FROM sales
             WHERE date(created_at) >= ? AND date(created_at) < ?
         """, (start_date, end_date))
@@ -183,8 +186,8 @@ async def sales_period(update: Update, context):
                 s.seller_code,
                 s.full_name,
                 COUNT(*) as sales_count,
-                SUM(sa.quantity) as total_quantity,
-                SUM(sa.amount) as total_amount
+                COALESCE(SUM(sa.quantity), 0) as total_quantity,
+                COALESCE(SUM(sa.amount), 0) as total_amount
             FROM sales sa
             JOIN sellers s ON sa.seller_id = s.id
             WHERE date(sa.created_at) >= ? AND date(sa.created_at) < ?
@@ -198,8 +201,8 @@ async def sales_period(update: Update, context):
             SELECT 
                 p.product_name,
                 COUNT(*) as sales_count,
-                SUM(sa.quantity) as total_quantity,
-                SUM(sa.amount) as total_amount
+                COALESCE(SUM(sa.quantity), 0) as total_quantity,
+                COALESCE(SUM(sa.amount), 0) as total_amount
             FROM sales sa
             JOIN products p ON sa.product_id = p.id
             WHERE date(sa.created_at) >= ? AND date(sa.created_at) < ?
@@ -249,7 +252,7 @@ async def report_payments(update: Update, context):
                 SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,
                 SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved_count,
                 SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected_count,
-                SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END) as total_approved_amount
+                COALESCE(SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), 0) as total_approved_amount
             FROM payment_requests
         """)
         stats = cursor.fetchone()
@@ -277,7 +280,7 @@ async def report_payments(update: Update, context):
                 s.seller_code,
                 s.full_name,
                 COUNT(pr.id) as requests_count,
-                SUM(pr.amount) as total_amount
+                COALESCE(SUM(pr.amount), 0) as total_amount
             FROM sellers s
             LEFT JOIN payment_requests pr ON s.id = pr.seller_id AND pr.status = 'approved'
             GROUP BY s.id
@@ -316,72 +319,83 @@ async def report_payments(update: Update, context):
     )
     return MAIN_MENU
 
-# ==== ОТЧЕТ ПО ТОВАРАМ ====
+# ==== ОТЧЕТ ПО ТОВАРАМ (ИСПРАВЛЕННАЯ ВЕРСИЯ) ====
 async def report_products(update: Update, context):
     """Отчет по товарам (остатки по всем продавцам)"""
     query = update.callback_query
     await query.answer()
     
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        # Общие остатки по товарам
-        cursor.execute("""
-            SELECT 
-                p.id,
-                p.product_name,
-                p.price,
-                SUM(sp.quantity) as total_quantity,
-                SUM(sp.quantity * p.price) as total_value
-            FROM products p
-            LEFT JOIN seller_products sp ON p.id = sp.product_id
-            WHERE p.is_active = 1
-            GROUP BY p.id
-            ORDER BY p.product_name
-        """)
-        products = cursor.fetchall()
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            # Общие остатки по товарам
+            cursor.execute("""
+                SELECT 
+                    p.id,
+                    p.product_name,
+                    p.price,
+                    COALESCE(SUM(sp.quantity), 0) as total_quantity,
+                    COALESCE(SUM(sp.quantity * p.price), 0) as total_value
+                FROM products p
+                LEFT JOIN seller_products sp ON p.id = sp.product_id
+                WHERE p.is_active = 1
+                GROUP BY p.id
+                ORDER BY p.product_name
+            """)
+            products = cursor.fetchall()
+            
+            # Товары с нулевым остатком
+            cursor.execute("""
+                SELECT p.product_name
+                FROM products p
+                WHERE p.is_active = 1
+                AND NOT EXISTS (
+                    SELECT 1 FROM seller_products sp 
+                    WHERE sp.product_id = p.id AND sp.quantity > 0
+                )
+            """)
+            zero_stock = cursor.fetchall()
         
-        # Товары с нулевым остатком
-        cursor.execute("""
-            SELECT p.product_name
-            FROM products p
-            WHERE p.is_active = 1
-            AND NOT EXISTS (
-                SELECT 1 FROM seller_products sp 
-                WHERE sp.product_id = p.id AND sp.quantity > 0
+        if not products:
+            await query.edit_message_text(
+                "📭 Нет товаров",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")
+                ]])
             )
-        """)
-        zero_stock = cursor.fetchall()
-    
-    if not products:
+            return MAIN_MENU
+        
+        text = "📦 Отчет по товарам\n\n"
+        total_value_all = 0
+        for p in products:
+            text += f"• {p['product_name']}: {p['total_quantity']} упак на сумму {p['total_value']} руб (цена {p['price']} руб)\n"
+            total_value_all += p['total_value']
+        
+        text += f"\nОбщая стоимость товаров на складах: {total_value_all} руб\n"
+        
+        if zero_stock:
+            text += "\nТовары с нулевым остатком:\n"
+            for z in zero_stock:
+                text += f"• {z['product_name']}\n"
+        
+        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Убираем Markdown, чтобы избежать проблем со спецсимволами в названиях товаров
         await query.edit_message_text(
-            "📭 Нет товаров",
+            text,
+            reply_markup=reply_markup
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка в report_products: {e}")
+        await query.edit_message_text(
+            f"❌ Произошла ошибка: {str(e)}",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")
             ]])
         )
-        return MAIN_MENU
     
-    text = "📦 **Отчет по товарам**\n\n"
-    total_value_all = 0
-    for p in products:
-        text += f"• {p['product_name']}: {p['total_quantity']} упак на сумму {p['total_value']} руб (цена {p['price']} руб)\n"
-        total_value_all += p['total_value']
-    
-    text += f"\n**Общая стоимость товаров на складах:** {total_value_all} руб\n"
-    
-    if zero_stock:
-        text += "\n**Товары с нулевым остатком:**\n"
-        for z in zero_stock:
-            text += f"• {z['product_name']}\n"
-    
-    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await query.edit_message_text(
-        text,
-        reply_markup=reply_markup,
-        parse_mode='Markdown'
-    )
     return MAIN_MENU
 
 # ==== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====
