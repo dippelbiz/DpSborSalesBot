@@ -7,16 +7,39 @@
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
-
 from database import db
-from keyboards import get_back_and_cancel_keyboard, get_main_menu, get_confirm_keyboard
+from config import config
+from keyboards import get_main_menu, get_back_and_cancel_keyboard, get_confirm_keyboard
 from backup_decorator import send_backup_to_admin
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Состояния разговора
 SELECTING_PRODUCT, ENTERING_QUANTITY, CONFIRMING = range(3)
 
 async def orders_start(update: Update, context):
     """Начало создания заявки"""
+    # Проверяем, что пользователь - активированный продавец
+    user_id = update.effective_user.id
+    
+    # Проверяем, есть ли продавец с таким Telegram ID
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM sellers WHERE telegram_id = ?", (user_id,))
+        seller = cursor.fetchone()
+    
+    if not seller:
+        await update.message.reply_text(
+            "❌ Вы не активированы как продавец. Нажмите /start для активации.",
+            reply_markup=get_main_menu()
+        )
+        return ConversationHandler.END
+    
+    # Сохраняем seller_id в контекст для дальнейшего использования
+    context.user_data['seller_id'] = seller['id']
+    context.user_data['seller_code'] = seller['seller_code']
+    
     await update.message.reply_text(
         "📦 Создание новой заявки на поставку\n\n"
         "Выберите товар:",
@@ -28,15 +51,20 @@ async def get_products_keyboard():
     """Получение клавиатуры с товарами"""
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, product_name, price FROM products WHERE is_active = 1")
+        cursor.execute("SELECT id, product_name, price FROM products WHERE is_active = 1 ORDER BY product_name")
         products = cursor.fetchall()
+    
+    if not products:
+        # Если товаров нет, просто вернем клавиатуру с кнопкой отмены
+        keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data="cancel")]]
+        return InlineKeyboardMarkup(keyboard)
     
     # Создаем инлайн-клавиатуру
     keyboard = []
     row = []
     for i, product in enumerate(products):
         button = InlineKeyboardButton(
-            f"{product['product_name']} ({product['price']} руб)", 
+            f"{product['product_name']} ({product['price']} руб)",
             callback_data=f"product_{product['id']}"
         )
         row.append(button)
@@ -72,6 +100,13 @@ async def product_selected(update: Update, context):
         cursor.execute("SELECT product_name, price FROM products WHERE id = ?", (product_id,))
         product = cursor.fetchone()
     
+    if not product:
+        await query.edit_message_text(
+            "❌ Товар не найден",
+            reply_markup=get_main_menu()
+        )
+        return ConversationHandler.END
+    
     context.user_data['selected_product'] = product['product_name']
     context.user_data['product_price'] = product['price']
     
@@ -89,7 +124,11 @@ async def quantity_entered(update: Update, context):
     text = update.message.text
     
     if text == '🔙 Назад':
-        await orders_start(update, context)
+        # Возвращаемся к выбору товара
+        await update.message.reply_text(
+            "📦 Выберите товар:",
+            reply_markup=await get_products_keyboard()
+        )
         return SELECTING_PRODUCT
     
     if text == '❌ Отмена':
@@ -138,8 +177,8 @@ async def confirm_order(update: Update, context):
     
     if query.data == 'confirm':
         # Создаем заявку в БД
-        seller_id = 1  # Здесь нужно получить ID продавца
-        seller_code = "А"  # Здесь нужно получить код продавца
+        seller_id = context.user_data.get('seller_id')
+        seller_code = context.user_data.get('seller_code')
         product_id = context.user_data['selected_product_id']
         quantity = context.user_data['quantity']
         price = context.user_data['product_price']
@@ -206,7 +245,22 @@ async def confirm_order(update: Update, context):
 
 async def my_orders(update: Update, context):
     """Просмотр своих заявок"""
-    seller_id = 1  # Здесь нужно получить ID продавца
+    user_id = update.effective_user.id
+    
+    # Получаем seller_id
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sellers WHERE telegram_id = ?", (user_id,))
+        result = cursor.fetchone()
+    
+    if not result:
+        await update.message.reply_text(
+            "❌ Вы не активированы как продавец.",
+            reply_markup=get_main_menu()
+        )
+        return
+    
+    seller_id = result[0]
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
@@ -260,6 +314,5 @@ orders_conv = ConversationHandler(
         ]
     },
     fallbacks=[CommandHandler('cancel', orders_start)],
-    allow_reentry=True  # ← ВАЖНО: добавляем эту строку
-
+    allow_reentry=True
 )
