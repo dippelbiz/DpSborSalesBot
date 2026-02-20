@@ -155,16 +155,19 @@ async def confirm_receipt_start(update: Update, context):
 
     # Убираем клавиатуру и сообщаем о начале
     await query.edit_message_text("🔄 Начинаем подтверждение получения...", reply_markup=None)
-    await ask_next_quantity(update, context)
+
+    # Запрашиваем количество для первого товара новым сообщением
+    await send_quantity_request(context, update.effective_user.id)
     return ENTERING_QUANTITY
 
-async def ask_next_quantity(update: Update, context):
-    """Запросить фактически полученное количество для текущего товара."""
+async def send_quantity_request(context, chat_id):
+    """Отправляет запрос количества для текущего товара."""
     items = context.user_data['shipment_items']
     idx = context.user_data['receipt_index']
 
     if idx >= len(items):
-        await show_receipt_summary(update, context)
+        # Все товары обработаны – покажем сводку
+        await show_receipt_summary(context, chat_id)
         return
 
     item = items[idx]
@@ -175,17 +178,12 @@ async def ask_next_quantity(update: Update, context):
     text += f"Заказано: {ordered} упак.\n"
     text += f"Введите фактически полученное количество (целое число, не больше {ordered}):"
 
-    if update.callback_query:
-        # Если вызвано из callback – редактируем последнее сообщение
-        await update.callback_query.edit_message_text(
-            text, reply_markup=get_back_and_cancel_keyboard(), parse_mode='Markdown'
-        )
-    else:
-        # Иначе отправляем новое
-        await update.message.reply_text(
-            text, reply_markup=get_back_and_cancel_keyboard(), parse_mode='Markdown'
-        )
-    return ENTERING_QUANTITY
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=get_back_and_cancel_keyboard(),
+        parse_mode='Markdown'
+    )
 
 async def quantity_received(update: Update, context):
     """Обработка ввода полученного количества для текущего товара."""
@@ -193,7 +191,6 @@ async def quantity_received(update: Update, context):
     logger.info("quantity_received: %s", text)
 
     if text == '🔙 Назад':
-        # Вернуться к деталям заявки
         await show_shipment_details(update, context)
         return SELECTING_SHIPMENT
 
@@ -233,10 +230,11 @@ async def quantity_received(update: Update, context):
     context.user_data['received_quantities'][item_id] = qty
     context.user_data['receipt_index'] += 1
 
-    await ask_next_quantity(update, context)
+    # Запрашиваем следующий товар
+    await send_quantity_request(context, update.effective_user.id)
     return ENTERING_QUANTITY
 
-async def show_receipt_summary(update: Update, context):
+async def show_receipt_summary(context, chat_id):
     """Показать сводку введённых количеств и запросить подтверждение."""
     items = context.user_data['shipment_items']
     received = context.user_data['received_quantities']
@@ -270,9 +268,12 @@ async def show_receipt_summary(update: Update, context):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Отправляем новым сообщением
-    await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
-    return CONFIRMING_RECEIPT
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
 
 @send_backup_to_admin("подтверждение получения поставки")
 async def final_confirm(update: Update, context):
@@ -415,9 +416,10 @@ async def edit_quantities(update: Update, context):
     await query.answer()
     logger.info("edit_quantities called")
 
+    # Сбрасываем индекс и словарь полученных количеств
     context.user_data['receipt_index'] = 0
     context.user_data['received_quantities'] = {}
-    await ask_next_quantity(update, context)
+    await send_quantity_request(context, update.effective_user.id)
     return ENTERING_QUANTITY
 
 async def cancel_receipt(update: Update, context):
