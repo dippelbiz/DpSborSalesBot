@@ -156,20 +156,14 @@ async def confirm_receipt_start(update: Update, context):
     # Убираем клавиатуру и сообщаем о начале
     await query.edit_message_text("🔄 Начинаем подтверждение получения...", reply_markup=None)
 
-    # Запрашиваем количество для первого товара новым сообщением
+    # Запрашиваем количество для первого товара
     await send_quantity_request(context, update.effective_user.id)
     return ENTERING_QUANTITY
 
 async def send_quantity_request(context, chat_id):
-    """Отправляет запрос количества для текущего товара."""
+    """Отправляет запрос количества для текущего товара (индекс уже установлен)."""
     items = context.user_data['shipment_items']
     idx = context.user_data['receipt_index']
-
-    if idx >= len(items):
-        # Все товары обработаны – покажем сводку
-        await show_receipt_summary(context, chat_id)
-        return
-
     item = items[idx]
     product_name = item['product_name']
     ordered = item['quantity_ordered']
@@ -230,11 +224,17 @@ async def quantity_received(update: Update, context):
     context.user_data['received_quantities'][item_id] = qty
     context.user_data['receipt_index'] += 1
 
-    # Запрашиваем следующий товар
-    await send_quantity_request(context, update.effective_user.id)
-    return ENTERING_QUANTITY
+    # Проверяем, остались ли ещё товары
+    if context.user_data['receipt_index'] >= len(items):
+        # Все товары обработаны – показываем сводку
+        await show_receipt_summary(update, context)
+        return CONFIRMING_RECEIPT
+    else:
+        # Есть ещё товары – запрашиваем следующий
+        await send_quantity_request(context, update.effective_user.id)
+        return ENTERING_QUANTITY
 
-async def show_receipt_summary(context, chat_id):
+async def show_receipt_summary(update: Update, context):
     """Показать сводку введённых количеств и запросить подтверждение."""
     items = context.user_data['shipment_items']
     received = context.user_data['received_quantities']
@@ -269,7 +269,7 @@ async def show_receipt_summary(context, chat_id):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await context.bot.send_message(
-        chat_id=chat_id,
+        chat_id=update.effective_user.id,
         text=text,
         reply_markup=reply_markup,
         parse_mode='Markdown'
