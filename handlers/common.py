@@ -188,10 +188,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif text == '⚙️ Настройки':
             from handlers.admin.settings import admin_settings_start
             return await admin_settings_start(update, context)
-        
-        elif text == '👥 Управление продавцами':
-            from handlers.admin.sellers import admin_sellers_start
-            return await admin_sellers_start(update, context)
     
     # Проверяем, активирован ли продавец
     with db.get_connection() as conn:
@@ -301,5 +297,5 @@ activation_conv = ConversationHandler(
         ]
     },
     fallbacks=[CommandHandler('cancel', cancel_activation)],
-    allow_reentry=True  # Разрешаем прерывание
+    allow_reentry=True
 )
