@@ -9,7 +9,7 @@ from keyboards import get_admin_menu
 from backup_decorator import send_backup_to_admin
 
 # Состояния разговора
-MAIN_MENU, ADD_SELLER_CODE, ADD_SELLER_NAME, ADD_SELLER_TG_ID, LIST_SELLERS, EDIT_SELLER, CONFIRM_DELETE, PRODUCTS_MENU, ADD_PRODUCT, EDIT_PRODUCT = range(10)
+MAIN_MENU, ADD_SELLER_CODE, ADD_SELLER_NAME, ADD_SELLER_TG_ID, LIST_SELLERS, EDIT_SELLER, CONFIRM_DELETE, PRODUCTS_MENU, ADD_PRODUCT_NAME, ADD_PRODUCT_PRICE, ADD_PRODUCT_CONFIRM, EDIT_PRODUCT = range(12)
 
 async def admin_settings_start(update: Update, context):
     """Главное меню настроек"""
@@ -608,7 +608,7 @@ async def settings_products(update: Update, context):
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return PRODUCTS_MENU
 
-# ===== ДОБАВЛЕНИЕ ТОВАРА =====
+# ===== ДОБАВЛЕНИЕ ТОВАРА (ИСПРАВЛЕННАЯ ВЕРСИЯ) =====
 
 async def product_add_start(update: Update, context):
     """Начало добавления нового товара - шаг 1: название"""
@@ -631,7 +631,7 @@ async def product_add_start(update: Update, context):
             InlineKeyboardButton("❌ Отмена", callback_data="product_cancel")
         ]])
     )
-    return ADD_PRODUCT
+    return ADD_PRODUCT_NAME
 
 async def product_add_name(update: Update, context):
     """Шаг 1: обработка ввода названия товара"""
@@ -651,7 +651,7 @@ async def product_add_name(update: Update, context):
                 InlineKeyboardButton("❌ Отмена", callback_data="product_cancel")
             ]])
         )
-        return ADD_PRODUCT
+        return ADD_PRODUCT_NAME
     
     # Проверяем уникальность названия
     with db.get_connection() as conn:
@@ -665,7 +665,7 @@ async def product_add_name(update: Update, context):
                     InlineKeyboardButton("❌ Отмена", callback_data="product_cancel")
                 ]])
             )
-            return ADD_PRODUCT
+            return ADD_PRODUCT_NAME
     
     # Сохраняем название в контекст
     context.user_data['new_product_name'] = product_name
@@ -676,10 +676,10 @@ async def product_add_name(update: Update, context):
         f"Например: 250, 300, 150",
         parse_mode='Markdown'
     )
-    return ADD_PRODUCT
+    return ADD_PRODUCT_PRICE
 
 async def product_add_price(update: Update, context):
-    """Шаг 2: обработка ввода цены и подтверждение"""
+    """Шаг 2: обработка ввода цены"""
     user_id = update.effective_user.id
     
     if user_id not in config.ADMIN_IDS:
@@ -700,7 +700,7 @@ async def product_add_price(update: Update, context):
                 InlineKeyboardButton("❌ Отмена", callback_data="product_cancel")
             ]])
         )
-        return ADD_PRODUCT
+        return ADD_PRODUCT_PRICE
     
     product_name = context.user_data.get('new_product_name')
     
@@ -732,7 +732,7 @@ async def product_add_price(update: Update, context):
         reply_markup=reply_markup
     )
     
-    return ADD_PRODUCT
+    return ADD_PRODUCT_CONFIRM
 
 @send_backup_to_admin("добавление товара")
 async def product_confirm(update: Update, context):
@@ -791,6 +791,32 @@ async def product_confirm(update: Update, context):
             del context.user_data[key]
     
     return PRODUCTS_MENU
+
+async def product_edit_name(update: Update, context):
+    """Возврат к редактированию названия"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "Введите новое название товара:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="product_cancel")
+        ]])
+    )
+    return ADD_PRODUCT_NAME
+
+async def product_edit_price(update: Update, context):
+    """Возврат к редактированию цены"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "Введите новую цену товара (в рублях):",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="product_cancel")
+        ]])
+    )
+    return ADD_PRODUCT_PRICE
 
 # ===== РЕДАКТИРОВАНИЕ ТОВАРА =====
 
@@ -1184,13 +1210,21 @@ admin_settings_conv = ConversationHandler(
             CallbackQueryHandler(product_cancel, pattern='^product_cancel$'),
             CallbackQueryHandler(product_cancel, pattern='^product_cancel_edit$')
         ],
-        ADD_PRODUCT: [
-            CallbackQueryHandler(product_confirm, pattern='^product_confirm$'),
-            CallbackQueryHandler(product_add_start, pattern='^product_edit_name$'),
-            CallbackQueryHandler(product_add_start, pattern='^product_edit_price$'),
+        ADD_PRODUCT_NAME: [
             CallbackQueryHandler(product_cancel, pattern='^product_cancel$'),
-            MessageHandler(filters.TEXT & ~filters.COMMAND, product_add_name),
+            CallbackQueryHandler(product_edit_name, pattern='^product_edit_name$'),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, product_add_name)
+        ],
+        ADD_PRODUCT_PRICE: [
+            CallbackQueryHandler(product_cancel, pattern='^product_cancel$'),
+            CallbackQueryHandler(product_edit_price, pattern='^product_edit_price$'),
             MessageHandler(filters.TEXT & ~filters.COMMAND, product_add_price)
+        ],
+        ADD_PRODUCT_CONFIRM: [
+            CallbackQueryHandler(product_confirm, pattern='^product_confirm$'),
+            CallbackQueryHandler(product_edit_name, pattern='^product_edit_name$'),
+            CallbackQueryHandler(product_edit_price, pattern='^product_edit_price$'),
+            CallbackQueryHandler(product_cancel, pattern='^product_cancel$')
         ],
         EDIT_PRODUCT: [
             CallbackQueryHandler(product_change_price, pattern='^product_change_price$'),
