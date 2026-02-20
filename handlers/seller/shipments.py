@@ -25,7 +25,6 @@ async def shipments_start(update: Update, context):
     user_id = update.effective_user.id
     logger.info("shipments_start called by user %s", user_id)
 
-    # Проверяем, что пользователь – активированный продавец
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id, seller_code FROM sellers WHERE telegram_id = ?", (user_id,))
@@ -41,7 +40,6 @@ async def shipments_start(update: Update, context):
         context.user_data['seller_id'] = seller_id
         context.user_data['seller_code'] = seller_code
 
-    # Получаем все заявки продавца со статусом 'shipped'
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -62,7 +60,6 @@ async def shipments_start(update: Update, context):
         )
         return ConversationHandler.END
 
-    # Формируем инлайн-клавиатуру со списком заявок
     keyboard = []
     for s in shipments:
         btn_text = f"📦 {s['order_number']} от {s['created_at'][:10]} ({s['items_count']} поз.)"
@@ -80,6 +77,7 @@ async def shipment_selected(update: Update, context):
     """Показать детали выбранной заявки."""
     query = update.callback_query
     await query.answer()
+    logger.info("shipment_selected: %s", query.data)
 
     if query.data == "shipments_back":
         await query.edit_message_text("Выход в главное меню.")
@@ -93,7 +91,6 @@ async def shipment_selected(update: Update, context):
     shipment_id = int(query.data.replace('shipment_', ''))
     context.user_data['current_shipment_id'] = shipment_id
 
-    # Получаем данные заявки и список товаров с product_id и ценой
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -129,7 +126,6 @@ async def shipment_selected(update: Update, context):
         text += f"• {product_name}: {qty} упак × {price} руб = {subtotal} руб\n"
     text += f"\n**Общая сумма: {total} руб**"
 
-    # Сохраняем список товаров для дальнейшего использования
     context.user_data['shipment_items'] = items
 
     keyboard = [
@@ -144,19 +140,21 @@ async def shipment_selected(update: Update, context):
     return SELECTING_SHIPMENT
 
 async def confirm_receipt_start(update: Update, context):
-    """Начать процесс подтверждения получения – запрос количества для первого товара."""
+    """Начать процесс подтверждения получения."""
     query = update.callback_query
     await query.answer()
+    logger.info("confirm_receipt_start called")
 
     items = context.user_data.get('shipment_items')
     if not items:
         await query.edit_message_text("❌ Ошибка: данные заявки не найдены.")
         return SELECTING_SHIPMENT
 
-    # Инициализируем словарь для хранения введённых количеств
     context.user_data['received_quantities'] = {}
     context.user_data['receipt_index'] = 0
 
+    # Убираем клавиатуру и сообщаем о начале
+    await query.edit_message_text("🔄 Начинаем подтверждение получения...", reply_markup=None)
     await ask_next_quantity(update, context)
     return ENTERING_QUANTITY
 
@@ -166,7 +164,6 @@ async def ask_next_quantity(update: Update, context):
     idx = context.user_data['receipt_index']
 
     if idx >= len(items):
-        # Все товары обработаны, переходим к сводке
         await show_receipt_summary(update, context)
         return
 
@@ -178,12 +175,13 @@ async def ask_next_quantity(update: Update, context):
     text += f"Заказано: {ordered} упак.\n"
     text += f"Введите фактически полученное количество (целое число, не больше {ordered}):"
 
-    # Если это первый запрос, редактируем сообщение с деталями, иначе отправляем новое
     if update.callback_query:
+        # Если вызвано из callback – редактируем последнее сообщение
         await update.callback_query.edit_message_text(
             text, reply_markup=get_back_and_cancel_keyboard(), parse_mode='Markdown'
         )
     else:
+        # Иначе отправляем новое
         await update.message.reply_text(
             text, reply_markup=get_back_and_cancel_keyboard(), parse_mode='Markdown'
         )
@@ -192,6 +190,7 @@ async def ask_next_quantity(update: Update, context):
 async def quantity_received(update: Update, context):
     """Обработка ввода полученного количества для текущего товара."""
     text = update.message.text
+    logger.info("quantity_received: %s", text)
 
     if text == '🔙 Назад':
         # Вернуться к деталям заявки
@@ -230,12 +229,10 @@ async def quantity_received(update: Update, context):
         )
         return ENTERING_QUANTITY
 
-    # Сохраняем введённое количество для текущего товара
     item_id = item['item_id']
     context.user_data['received_quantities'][item_id] = qty
-
-    # Переходим к следующему товару
     context.user_data['receipt_index'] += 1
+
     await ask_next_quantity(update, context)
     return ENTERING_QUANTITY
 
@@ -273,6 +270,7 @@ async def show_receipt_summary(update: Update, context):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    # Отправляем новым сообщением
     await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     return CONFIRMING_RECEIPT
 
@@ -281,6 +279,7 @@ async def final_confirm(update: Update, context):
     """Финальное подтверждение – обновляем БД и добавляем товары на склад."""
     query = update.callback_query
     await query.answer()
+    logger.info("final_confirm called")
 
     shipment_id = context.user_data['current_shipment_id']
     seller_id = context.user_data['seller_id']
@@ -288,11 +287,10 @@ async def final_confirm(update: Update, context):
     received = context.user_data['received_quantities']
     seller_code = context.user_data['seller_code']
 
-    underdelivered = []  # список товаров, полученных не полностью
+    underdelivered = []
 
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Обновляем каждую позицию: записываем полученное количество
         for item in items:
             item_id = item['item_id']
             product_id = item['product_id']
@@ -305,7 +303,6 @@ async def final_confirm(update: Update, context):
                 WHERE id = ?
             """, (rec_qty, item_id))
 
-            # Добавляем полученный товар на склад продавца
             cursor.execute("""
                 UPDATE seller_products
                 SET quantity = quantity + ?
@@ -315,7 +312,6 @@ async def final_confirm(update: Update, context):
             if rec_qty < ordered:
                 underdelivered.append(item)
 
-        # Меняем статус заявки на 'completed'
         cursor.execute("""
             UPDATE orders
             SET status = 'completed', completed_at = CURRENT_TIMESTAMP
@@ -323,7 +319,6 @@ async def final_confirm(update: Update, context):
         """, (shipment_id,))
 
     if underdelivered:
-        # Предложить создать новую заявку на недостающее
         context.user_data['underdelivered'] = underdelivered
         keyboard = [
             [InlineKeyboardButton("✅ Да, создать", callback_data="create_shortage")],
@@ -336,7 +331,6 @@ async def final_confirm(update: Update, context):
         )
         return CONFIRMING_RECEIPT
 
-    # Если всё получено полностью
     await query.edit_message_text(
         "✅ Получение подтверждено. Товары добавлены на склад.",
         reply_markup=None
@@ -353,6 +347,7 @@ async def create_shortage_order(update: Update, context):
     """Создать новую заявку на недостающее количество."""
     query = update.callback_query
     await query.answer()
+    logger.info("create_shortage_order called")
 
     seller_id = context.user_data['seller_id']
     seller_code = context.user_data['seller_code']
@@ -364,7 +359,6 @@ async def create_shortage_order(update: Update, context):
 
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Получаем следующий номер заявки продавца за сегодня
         cursor.execute("""
             SELECT COUNT(*) FROM orders
             WHERE seller_code = ? AND date(created_at) = date('now')
@@ -372,14 +366,12 @@ async def create_shortage_order(update: Update, context):
         count = cursor.fetchone()[0] + 1
         new_order_number = f"{seller_code}-{date_str}-{count:03d}"
 
-        # Создаём новую заявку
         cursor.execute("""
             INSERT INTO orders (order_number, seller_id, seller_code, status)
             VALUES (?, ?, ?, 'new')
         """, (new_order_number, seller_id, seller_code))
         new_order_id = cursor.lastrowid
 
-        # Добавляем недостающие товары
         for item in underdelivered:
             shortage = item['quantity_ordered'] - received[item['item_id']]
             cursor.execute("""
@@ -403,6 +395,7 @@ async def no_shortage(update: Update, context):
     """Не создавать новую заявку на недостающее."""
     query = update.callback_query
     await query.answer()
+    logger.info("no_shortage called")
 
     await query.edit_message_text(
         "✅ Получение подтверждено. Товары добавлены на склад.",
@@ -420,8 +413,8 @@ async def edit_quantities(update: Update, context):
     """Вернуться к редактированию количеств (начать заново)."""
     query = update.callback_query
     await query.answer()
+    logger.info("edit_quantities called")
 
-    # Сбрасываем индекс и словарь полученных количеств
     context.user_data['receipt_index'] = 0
     context.user_data['received_quantities'] = {}
     await ask_next_quantity(update, context)
@@ -431,6 +424,7 @@ async def cancel_receipt(update: Update, context):
     """Отменить процесс подтверждения и вернуться к деталям заявки."""
     query = update.callback_query
     await query.answer()
+    logger.info("cancel_receipt called")
 
     await query.edit_message_text("❌ Подтверждение отменено.")
     await show_shipment_details(update, context)
@@ -440,8 +434,7 @@ async def back_to_list(update: Update, context):
     """Вернуться к списку отгруженных поставок."""
     query = update.callback_query
     await query.answer()
-    # Имитируем вызов shipments_start, но так как у нас callback, нужно переслать сообщение
-    await query.edit_message_text("Загрузка списка...")
+    logger.info("back_to_list called")
     await shipments_start(update, context)
     return SELECTING_SHIPMENT
 
@@ -477,7 +470,6 @@ async def show_shipment_details(update: Update, context):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Отправляем новым сообщением (старое уже неактуально)
     await context.bot.send_message(
         chat_id=update.effective_user.id,
         text=text,
@@ -486,7 +478,7 @@ async def show_shipment_details(update: Update, context):
     )
     return SELECTING_SHIPMENT
 
-# Обработчик разговора для отгруженных поставок
+# ConversationHandler для отгруженных поставок
 shipments_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex('^📤 Отгруженные поставки$'), shipments_start)],
     states={
