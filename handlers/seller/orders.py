@@ -113,11 +113,12 @@ async def product_selected(update: Update, context):
     context.user_data['selected_product'] = product['product_name']
     context.user_data['product_price'] = product['price']
     
+    # ИСПРАВЛЕНИЕ: добавляем reply_markup=None
     await query.edit_message_text(
         f"Товар: {product['product_name']}\n"
         f"Цена: {product['price']} руб/упак\n\n"
         f"Введите количество упаковок (только целое число):",
-        reply_markup=get_back_and_cancel_keyboard()
+        reply_markup=None
     )
     
     return ENTERING_QUANTITY
@@ -322,3 +323,4 @@ orders_conv = ConversationHandler(
     fallbacks=[CommandHandler('cancel', orders_start)],
     allow_reentry=True
 )
+
