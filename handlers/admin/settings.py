@@ -1242,6 +1242,8 @@ admin_settings_conv = ConversationHandler(
         MAIN_MENU: [
             CallbackQueryHandler(settings_sellers, pattern='^settings_sellers$'),
             CallbackQueryHandler(settings_products, pattern='^settings_products$'),
+            CallbackQueryHandler(seller_add_start, pattern='^seller_add$'),
+            CallbackQueryHandler(seller_list, pattern='^seller_list$'),
             CallbackQueryHandler(back_to_main, pattern='^settings_back_to_main$'),
             CallbackQueryHandler(exit_settings, pattern='^settings_back$')
         ],
