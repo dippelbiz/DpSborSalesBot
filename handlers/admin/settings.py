@@ -46,6 +46,12 @@ async def settings_sellers(update: Update, context):
     query = update.callback_query
     await query.answer()
     
+    # Очищаем старые данные
+    keys = ['new_seller_code', 'new_seller_name', 'new_seller_tg_id', 'edit_seller_id']
+    for key in keys:
+        if key in context.user_data:
+            del context.user_data[key]
+    
     # Получаем список продавцов
     with db.get_connection() as conn:
         cursor = conn.cursor()
@@ -76,8 +82,6 @@ async def settings_sellers(update: Update, context):
     
     await query.edit_message_text(text, reply_markup=reply_markup)
     return MAIN_MENU
-
-# ===== ДОБАВЛЕНИЕ ПРОДАВЦА =====
 
 async def seller_add_start(update: Update, context):
     """Начало добавления продавца - шаг 1: код"""
@@ -322,7 +326,44 @@ async def seller_confirm(update: Update, context):
         await query.edit_message_text(f"❌ Ошибка: {e}")
         return MAIN_MENU
 
-# ===== РЕДАКТИРОВАНИЕ ПРОДАВЦА =====
+async def seller_edit_code(update: Update, context):
+    """Редактирование кода продавца"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "Введите новый код продавца:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="seller_cancel")
+        ]])
+    )
+    return ADD_SELLER_CODE
+
+async def seller_edit_name(update: Update, context):
+    """Редактирование имени продавца"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "Введите новое имя продавца:",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="seller_cancel")
+        ]])
+    )
+    return ADD_SELLER_NAME
+
+async def seller_edit_tg(update: Update, context):
+    """Редактирование Telegram ID"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "Введите новый Telegram ID продавца (или 0, если не указывать):",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="seller_cancel")
+        ]])
+    )
+    return ADD_SELLER_TG_ID
 
 async def seller_list(update: Update, context):
     """Просмотр списка продавцов"""
@@ -526,45 +567,6 @@ async def seller_confirm_delete(update: Update, context):
         await query.edit_message_text(f"❌ Ошибка удаления: {e}")
         return MAIN_MENU
 
-async def seller_edit_code(update: Update, context):
-    """Редактирование кода продавца"""
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        "Введите новый код продавца:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Отмена", callback_data="seller_cancel")
-        ]])
-    )
-    return ADD_SELLER_CODE
-
-async def seller_edit_name(update: Update, context):
-    """Редактирование имени продавца"""
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        "Введите новое имя продавца:",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Отмена", callback_data="seller_cancel")
-        ]])
-    )
-    return ADD_SELLER_NAME
-
-async def seller_edit_tg(update: Update, context):
-    """Редактирование Telegram ID"""
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        "Введите новый Telegram ID продавца (или 0, если не указывать):",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Отмена", callback_data="seller_cancel")
-        ]])
-    )
-    return ADD_SELLER_TG_ID
-
 async def seller_cancel(update: Update, context):
     """Отмена действия с продавцами"""
     query = update.callback_query
@@ -639,8 +641,6 @@ async def settings_products(update: Update, context):
     
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return PRODUCTS_MENU
-
-# ===== ДОБАВЛЕНИЕ ТОВАРА =====
 
 async def product_add_start(update: Update, context):
     """Начало добавления нового товара - шаг 1: название"""
@@ -857,8 +857,6 @@ async def product_edit_price(update: Update, context):
         ]])
     )
     return ADD_PRODUCT_PRICE
-
-# ===== РЕДАКТИРОВАНИЕ ТОВАРА =====
 
 async def product_edit_start(update: Update, context):
     """Редактирование товара - меню выбора действия"""
@@ -1318,5 +1316,5 @@ admin_settings_conv = ConversationHandler(
         ]
     },
     fallbacks=[CommandHandler('cancel', exit_settings)],
-    allow_reentry=True  # ← ВАЖНО: добавляем эту строку
+    allow_reentry=True
 )
