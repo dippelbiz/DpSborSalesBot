@@ -37,6 +37,7 @@ from handlers.seller.orders import orders_conv, my_orders_handler
 from handlers.seller.shipments import shipments_conv
 from handlers.seller.sales import sales_conv
 from handlers.seller.stock import stock_handler
+from handlers.seller.payment import payment_conv  # новый импорт
 
 # Обработчики администратора
 from handlers.admin.orders import admin_orders_conv
@@ -131,7 +132,7 @@ async def emergency_restore(update: Update, context):
 async def debug_callback(update: Update, context):
     if update.callback_query:
         logger.info(f"🔥 GLOBAL CALLBACK: {update.callback_query.data}")
-        await update.callback_query.answer()  # обязательно ответить, чтобы убрать "часики"
+        await update.callback_query.answer()
     return
 
 # === ФУНКЦИЯ ДЛЯ ЗАПУСКА С ВЕБХУКАМИ ===
@@ -158,18 +159,21 @@ async def run_webhook():
     application.add_handler(activation_conv)
     application.add_handler(MessageHandler(filters.Document.ALL, emergency_restore))
     
-    # ConversationHandler'ы
+    # ConversationHandler'ы продавцов
     application.add_handler(orders_conv)
     application.add_handler(shipments_conv)
     application.add_handler(sales_conv)
+    application.add_handler(payment_conv)  # новый обработчик выплат
+    
+    # ConversationHandler'ы администратора
     application.add_handler(admin_orders_conv)
     application.add_handler(admin_payments_conv)
     application.add_handler(admin_reports_conv)
     application.add_handler(admin_settings_conv)
     
-    # Обычные обработчики
+    # Обычные обработчики (MessageHandler)
     application.add_handler(my_orders_handler)
-    application.add_handler(MessageHandler(filters.Regex('^(Остатки)$'), stock_handler))
+    application.add_handler(stock_handler)  # Остатки
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     webhook_url = f"{URL}/telegram"
@@ -218,7 +222,6 @@ def main():
         logger.info("Запуск бота локально (polling)...")
         application = Application.builder().token(config.BOT_TOKEN).build()
         
-        # Добавляем отладочный обработчик для локального режима
         application.add_handler(CallbackQueryHandler(debug_callback), group=-1)
         
         application.add_handler(CommandHandler("start", start))
@@ -231,12 +234,13 @@ def main():
         application.add_handler(orders_conv)
         application.add_handler(shipments_conv)
         application.add_handler(sales_conv)
+        application.add_handler(payment_conv)
         application.add_handler(admin_orders_conv)
         application.add_handler(admin_payments_conv)
         application.add_handler(admin_reports_conv)
         application.add_handler(admin_settings_conv)
         application.add_handler(my_orders_handler)
-        application.add_handler(MessageHandler(filters.Regex('^(Остатки)$'), stock_handler))
+        application.add_handler(stock_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("✅ Бот запущен и готов к работе (polling)")
