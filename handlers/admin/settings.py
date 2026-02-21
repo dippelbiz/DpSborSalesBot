@@ -962,6 +962,7 @@ async def product_change_name(update: Update, context):
     )
     return EDIT_PRODUCT
 
+@send_backup_to_admin("изменение товара")
 async def product_update_field(update: Update, context):
     """Обновление поля товара (цены или названия)"""
     user_id = update.effective_user.id
@@ -1165,6 +1166,47 @@ async def product_confirm_delete(update: Update, context):
     except Exception as e:
         await query.edit_message_text(f"❌ Ошибка удаления: {e}")
         return MAIN_MENU
+
+@send_backup_to_admin("изменение статуса товара")
+async def product_toggle_status(update: Update, context):
+    """Смена статуса товара (активен/скрыт)"""
+    query = update.callback_query
+    await query.answer()
+    
+    product_id = context.user_data.get('edit_product_id')
+    
+    if not product_id:
+        await query.edit_message_text(
+            "❌ Ошибка: товар не выбран",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
+            ]])
+        )
+        return PRODUCTS_MENU
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT is_active, product_name FROM products WHERE id = ?", (product_id,))
+        product = cursor.fetchone()
+        
+        if product:
+            new_status = 0 if product['is_active'] else 1
+            cursor.execute("UPDATE products SET is_active = ? WHERE id = ?", (new_status, product_id))
+            status_text = "активирован" if new_status else "скрыт"
+            product_name = product['product_name']
+    
+    await query.edit_message_text(
+        f"✅ Статус товара '{product_name}' изменен на '{status_text}'",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 К товарам", callback_data="settings_products")
+        ]])
+    )
+    
+    # Очищаем данные
+    if 'edit_product_id' in context.user_data:
+        del context.user_data['edit_product_id']
+    
+    return PRODUCTS_MENU
 
 async def product_cancel(update: Update, context):
     """Отмена действия с товарами"""
