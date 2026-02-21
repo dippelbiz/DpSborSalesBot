@@ -13,6 +13,7 @@ from config import config
 from keyboards import get_main_menu, get_back_and_cancel_keyboard
 from backup_decorator import send_backup_to_admin
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ async def sales_start(update: Update, context):
 
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM sellers WHERE telegram_id = ?", (user_id,))
+        cursor.execute("SELECT id, seller_code FROM sellers WHERE telegram_id = ?", (user_id,))
         seller = cursor.fetchone()
         if not seller:
             await update.message.reply_text(
@@ -35,9 +36,16 @@ async def sales_start(update: Update, context):
             )
             return ConversationHandler.END
         seller_id = seller['id']
+        seller_code = seller['seller_code']
         context.user_data['seller_id'] = seller_id
+        context.user_data['seller_code'] = seller_code
 
-    # Получаем товары с ненулевым остатком
+    await send_product_list(update, context)
+    return SELECTING_PRODUCT
+
+async def send_product_list(update: Update, context):
+    """Отправляет сообщение со списком доступных товаров (инлайн-кнопки)."""
+    seller_id = context.user_data['seller_id']
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -51,13 +59,18 @@ async def sales_start(update: Update, context):
         logger.info("Found %d products with positive stock", len(products))
 
     if not products:
-        await update.message.reply_text(
-            "📭 У вас нет товаров в наличии для продажи.",
-            reply_markup=get_main_menu()
-        )
-        return ConversationHandler.END
+        text = "📭 У вас нет товаров в наличии для продажи."
+        if update.callback_query:
+            await update.callback_query.edit_message_text(text)
+            await context.bot.send_message(
+                chat_id=update.effective_user.id,
+                text="Выберите действие:",
+                reply_markup=get_main_menu()
+            )
+        else:
+            await update.message.reply_text(text, reply_markup=get_main_menu())
+        return
 
-    # Формируем инлайн-клавиатуру с товарами
     keyboard = []
     for prod in products:
         button = InlineKeyboardButton(
@@ -68,13 +81,19 @@ async def sales_start(update: Update, context):
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    logger.info("Sending keyboard with %d buttons", len(keyboard))
 
-    await update.message.reply_text(
-        "💰 Выберите товар, который продали:",
-        reply_markup=reply_markup
-    )
-    return SELECTING_PRODUCT
+    if update.callback_query:
+        # Если вызвано из callback – редактируем текущее сообщение
+        await update.callback_query.edit_message_text(
+            "💰 Выберите товар, который продали:",
+            reply_markup=reply_markup
+        )
+    else:
+        # Если новое сообщение
+        await update.message.reply_text(
+            "💰 Выберите товар, который продали:",
+            reply_markup=reply_markup
+        )
 
 async def product_selected(update: Update, context):
     """Обработка выбора товара – запрашиваем количество."""
@@ -94,7 +113,6 @@ async def product_selected(update: Update, context):
     product_id = int(query.data.replace('sell_', ''))
     context.user_data['selected_product_id'] = product_id
 
-    # Получаем информацию о товаре
     seller_id = context.user_data['seller_id']
     with db.get_connection() as conn:
         cursor = conn.cursor()
@@ -114,7 +132,7 @@ async def product_selected(update: Update, context):
     context.user_data['product_price'] = product['price']
     context.user_data['max_quantity'] = product['quantity']
 
-    # Убираем инлайн-клавиатуру, так как переходим к вводу текста
+    # Убираем инлайн-клавиатуру и переходим к вводу количества
     await query.edit_message_text(
         f"Товар: {product['product_name']}\n"
         f"Цена: {product['price']} руб/упак\n"
@@ -122,19 +140,10 @@ async def product_selected(update: Update, context):
         f"Введите количество проданных упаковок:",
         reply_markup=None
     )
-    # После этого бот будет ждать текстового ввода – клавиатура "Назад/Отмена" будет отправлена отдельно,
-    # но она уже есть в get_back_and_cancel_keyboard, которую мы используем в обработчике сообщений.
-    # В данном месте мы не отправляем клавиатуру, она появится, когда пользователь начнёт ввод,
-    # потому что обработчик quantity_entered использует get_back_and_cancel_keyboard при ошибках,
-    # но для первого запроса мы её не даём. Чтобы пользователь сразу видел кнопки, нужно отправить сообщение с клавиатурой.
-    # Лучше после редактирования отправить новое сообщение с клавиатурой. Но edit_message_text не может добавить обычную клавиатуру.
-    # Поэтому мы отредактируем сообщение, убрав инлайн, а затем следующим сообщением отправим запрос с reply-клавиатурой.
-    # Но так как у нас уже есть состояние ENTERING_QUANTITY, следующий шаг – ожидание сообщения, а клавиатуру мы можем отправить прямо сейчас отдельно.
-
-    # Отправим отдельное сообщение с запросом количества и reply-клавиатурой
+    # Отправляем отдельное сообщение с reply-клавиатурой (Назад/Отмена)
     await context.bot.send_message(
         chat_id=update.effective_user.id,
-        text=f"Введите количество проданных упаковок:",
+        text="Введите число:",
         reply_markup=get_back_and_cancel_keyboard()
     )
     return ENTERING_QUANTITY
@@ -145,8 +154,8 @@ async def quantity_entered(update: Update, context):
     logger.info("quantity_entered: %s", text)
 
     if text == '🔙 Назад':
-        # Возвращаемся к выбору товара
-        await sales_start(update, context)
+        # Возвращаемся к выбору товара – отправляем новый список
+        await send_product_list(update, context)
         return SELECTING_PRODUCT
 
     if text == '❌ Отмена':
@@ -202,26 +211,37 @@ async def quantity_entered(update: Update, context):
 
 @send_backup_to_admin("продажа товара")
 async def confirm_sale(update: Update, context):
-    """Подтверждение продажи – списываем товар, увеличиваем pending, возвращаемся к списку."""
+    """Подтверждение продажи – списываем товар, увеличиваем pending, записываем продажу."""
     query = update.callback_query
     await query.answer()
     logger.info("confirm_sale called")
 
     seller_id = context.user_data['seller_id']
+    seller_code = context.user_data['seller_code']
     product_id = context.user_data['selected_product_id']
     qty = context.user_data['sold_qty']
     price = context.user_data['product_price']
     total = qty * price
 
+    # Генерируем номер продажи (аналогично номеру заявки)
+    today = datetime.now()
+    date_str = today.strftime("%d%m")
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Проверяем остаток ещё раз (на всякий случай)
+        # Получаем количество продаж продавца за сегодня
+        cursor.execute("""
+            SELECT COUNT(*) FROM sales
+            WHERE seller_id = ? AND date(created_at) = date('now')
+        """, (seller_id,))
+        count = cursor.fetchone()[0] + 1
+        sale_number = f"П-{seller_code}-{date_str}-{count:03d}"  # П – продажа
+
+        # Проверяем остаток ещё раз внутри транзакции
         cursor.execute("SELECT quantity FROM seller_products WHERE seller_id = ? AND product_id = ?", (seller_id, product_id))
         avail = cursor.fetchone()[0]
         if avail < qty:
             await query.edit_message_text(
-                "❌ Ошибка: недостаточно товара. Возможно, остаток изменился. Попробуйте снова.",
-                reply_markup=None
+                "❌ Ошибка: недостаточно товара. Возможно, остаток изменился. Попробуйте снова."
             )
             return SELECTING_PRODUCT
 
@@ -241,29 +261,29 @@ async def confirm_sale(update: Update, context):
 
         # Записываем продажу в таблицу sales
         cursor.execute("""
-            INSERT INTO sales (seller_id, product_id, quantity, amount, created_at)
-            VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
-        """, (seller_id, product_id, qty, total))
+            INSERT INTO sales (sale_number, seller_id, product_id, quantity, amount, created_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        """, (sale_number, seller_id, product_id, qty, total))
 
-    # Убираем клавиатуру с подтверждения
+    # Сообщаем об успехе
     await query.edit_message_text(
         f"✅ Продажа оформлена!\n\n"
+        f"Номер: {sale_number}\n"
         f"Товар: {context.user_data['product_name']}\n"
         f"Количество: {qty} упак\n"
         f"Сумма: {total} руб\n"
-        f"Добавлено к переводу.",
-        reply_markup=None
+        f"Добавлено к переводу."
     )
 
-    # Очищаем временные данные, но оставляем seller_id
+    # Очищаем временные данные (кроме seller_id и seller_code)
     context.user_data.pop('selected_product_id', None)
     context.user_data.pop('product_name', None)
     context.user_data.pop('product_price', None)
     context.user_data.pop('max_quantity', None)
     context.user_data.pop('sold_qty', None)
 
-    # Возвращаемся к списку товаров для следующей продажи
-    await sales_start(update, context)
+    # Отправляем новое сообщение со списком товаров для продолжения
+    await send_product_list(update, context)
     return SELECTING_PRODUCT
 
 async def change_qty(update: Update, context):
@@ -272,6 +292,7 @@ async def change_qty(update: Update, context):
     await query.answer()
     logger.info("change_qty called")
 
+    # Убираем инлайн-клавиатуру
     await query.edit_message_text(
         f"Товар: {context.user_data['product_name']}\n"
         f"Цена: {context.user_data['product_price']} руб/упак\n"
@@ -279,9 +300,10 @@ async def change_qty(update: Update, context):
         f"Введите новое количество:",
         reply_markup=None
     )
+    # Отправляем reply-клавиатуру
     await context.bot.send_message(
         chat_id=update.effective_user.id,
-        text="Введите новое количество:",
+        text="Введите число:",
         reply_markup=get_back_and_cancel_keyboard()
     )
     return ENTERING_QUANTITY
@@ -292,8 +314,8 @@ async def cancel_sale(update: Update, context):
     await query.answer()
     logger.info("cancel_sale called")
 
-    await query.edit_message_text("❌ Продажа отменена.", reply_markup=None)
-    await sales_start(update, context)
+    await query.edit_message_text("❌ Продажа отменена.")
+    await send_product_list(update, context)
     return SELECTING_PRODUCT
 
 # ConversationHandler для продаж
