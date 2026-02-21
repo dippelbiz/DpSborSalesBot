@@ -47,7 +47,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seller = cursor.fetchone()
     
     if seller:
-        # Продавец уже активирован
+        # Продавец уже активирован – показываем главное меню продавца
         await update.message.reply_text(
             f"👋 С возвращением, {seller['full_name']}!\n\n"
             f"Ваш код: {seller['seller_code']}\n"
@@ -62,7 +62,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             details=f"Возврат продавца {seller['seller_code']}"
         )
     else:
-        # Новый пользователь - просим код активации
+        # Новый пользователь – просим код активации
         await update.message.reply_text(
             f"👋 Добро пожаловать, {user.full_name}!\n\n"
             f"Для активации аккаунта введите код, полученный от администратора.\n"
@@ -94,6 +94,19 @@ async def activate_seller(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardMarkup([['/start']], resize_keyboard=True)
         )
         return ConversationHandler.END
+    
+    # Проверяем, не активирован ли уже пользователь
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM sellers WHERE telegram_id = ?", (user.id,))
+        existing = cursor.fetchone()
+        if existing:
+            await update.message.reply_text(
+                f"👋 Вы уже активированы как {existing['full_name']}.\n"
+                f"Ваш код: {existing['seller_code']}",
+                reply_markup=get_main_menu()
+            )
+            return ConversationHandler.END
     
     # Ищем продавца с таким кодом
     with db.get_connection() as conn:
@@ -164,7 +177,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
     
-    # ВАЖНО: Завершаем текущий диалог при нажатии на любую кнопку меню
+    # Завершаем текущий диалог при нажатии на любую кнопку меню
     if context.user_data:
         context.user_data.clear()
     
