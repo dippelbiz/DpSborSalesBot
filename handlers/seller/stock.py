@@ -4,7 +4,8 @@
 """
 Обработчик для раздела "Остатки" (продавец)
 Показывает текущие остатки товаров на складе продавца,
-общую сумму долга, сумму к переводу и предлагает запросить выплату.
+количество проданного, стоимость непроданных товаров,
+общую сумму долга (она же стоимость непроданных) и сумму к переводу.
 """
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,7 +18,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 async def stock_start(update: Update, context):
-    """Показать остатки товаров продавца, долг, сумму к переводу и кнопку выплаты."""
+    """Показать остатки товаров продавца, продажи, долг и сумму к переводу."""
     user_id = update.effective_user.id
     logger.info("stock_start called by user %s", user_id)
 
@@ -33,18 +34,20 @@ async def stock_start(update: Update, context):
             return
         seller_id = seller['id']
 
-        # Получаем остатки продавца
+        # Получаем данные по каждому товару: остаток, сумма продаж, цена
         cursor.execute("""
             SELECT 
                 p.product_name,
-                sp.quantity,
+                COALESCE(sp.quantity, 0) as stock_quantity,
                 p.price,
-                (sp.quantity * p.price) as total
-            FROM seller_products sp
-            JOIN products p ON sp.product_id = p.id
-            WHERE sp.seller_id = ? AND p.is_active = 1
+                COALESCE(SUM(s.quantity), 0) as sold_quantity
+            FROM products p
+            LEFT JOIN seller_products sp ON sp.product_id = p.id AND sp.seller_id = ?
+            LEFT JOIN sales s ON s.product_id = p.id AND s.seller_id = ?
+            WHERE p.is_active = 1
+            GROUP BY p.id
             ORDER BY p.product_name
-        """, (seller_id,))
+        """, (seller_id, seller_id))
         products = cursor.fetchall()
 
         # Получаем сумму к переводу
@@ -53,21 +56,24 @@ async def stock_start(update: Update, context):
         pending_amount = pending_row['pending_amount'] if pending_row else 0
 
     # Формируем сообщение
-    if not products:
-        text = "📭 У вас пока нет товаров на складе.\n\n"
-    else:
-        text = "📊 **Ваши остатки на складе**\n\n"
-        total_debt = 0
-        for prod in products:
-            text += f"• **{prod['product_name']}**\n"
-            text += f"  Количество: {prod['quantity']} упак\n"
-            text += f"  Цена: {prod['price']} руб/упак\n"
-            text += f"  Стоимость: {prod['total']} руб\n\n"
-            total_debt += prod['total']
-        text += f"💰 **Общая стоимость товаров (долг перед админом): {total_debt} руб**\n"
+    text = "📊 **Ваши остатки на складе**\n\n"
+    total_unsold_value = 0
+    for prod in products:
+        product_name = prod['product_name']
+        stock = prod['stock_quantity']
+        price = prod['price']
+        sold = prod['sold_quantity']
+        unsold_value = stock * price
+        total_unsold_value += unsold_value
 
+        text += f"• **{product_name}**\n"
+        text += f"  Остаток на складе: {stock} упак\n"
+        text += f"  Продано: {sold} упак\n"
+        text += f"  Стоимость непроданных товаров: {unsold_value} руб\n\n"
+
+    text += f"💰 **Стоимость непроданных товаров на складе: {total_unsold_value} руб**\n"
     text += f"💵 **Сумма к переводу (от продаж): {pending_amount} руб**\n"
-    text += f"_Эту сумму можно передать администратору._"
+    text += f"_Эту сумму нужно передать администратору._"
 
     # Добавляем инлайн-кнопку для запроса выплаты (если есть что переводить)
     keyboard = []
