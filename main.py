@@ -36,8 +36,8 @@ from handlers.common import start, menu_handler, handle_message, activation_conv
 from handlers.seller.orders import orders_conv, my_orders_handler
 from handlers.seller.shipments import shipments_conv
 from handlers.seller.sales import sales_conv
-from handlers.seller.stock import stock_handler
-from handlers.seller.payment import payment_conv  # новый импорт
+from handlers.seller.stock import stock_handler, back_to_main_handler  # добавлен back_to_main_handler
+from handlers.seller.payment import payment_conv
 
 # Обработчики администратора
 from handlers.admin.orders import admin_orders_conv
@@ -163,7 +163,7 @@ async def run_webhook():
     application.add_handler(orders_conv)
     application.add_handler(shipments_conv)
     application.add_handler(sales_conv)
-    application.add_handler(payment_conv)  # новый обработчик выплат
+    application.add_handler(payment_conv)
     
     # ConversationHandler'ы администратора
     application.add_handler(admin_orders_conv)
@@ -171,9 +171,10 @@ async def run_webhook():
     application.add_handler(admin_reports_conv)
     application.add_handler(admin_settings_conv)
     
-    # Обычные обработчики (MessageHandler)
+    # Обычные обработчики (MessageHandler и CallbackQueryHandler)
     application.add_handler(my_orders_handler)
-    application.add_handler(stock_handler)  # Остатки
+    application.add_handler(stock_handler)
+    application.add_handler(back_to_main_handler)  # ← добавлен обработчик для кнопки "В меню"
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     webhook_url = f"{URL}/telegram"
@@ -241,6 +242,7 @@ def main():
         application.add_handler(admin_settings_conv)
         application.add_handler(my_orders_handler)
         application.add_handler(stock_handler)
+        application.add_handler(back_to_main_handler)  # ← добавлен обработчик для кнопки "В меню"
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("✅ Бот запущен и готов к работе (polling)")
