@@ -20,13 +20,18 @@ def get_admin_menu():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def get_back_keyboard():
+    """Клавиатура только с кнопкой 'Назад' (для раздела 'Реализовано')"""
+    keyboard = [['🔙 Назад']]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 def get_back_and_cancel_keyboard():
-    """Клавиатура с кнопками назад и отмена"""
+    """Клавиатура с кнопками 'Назад' и 'Отмена' (для других разделов)"""
     keyboard = [['🔙 Назад', '❌ Отмена']]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_confirm_keyboard():
-    """Инлайн-клавиатура подтверждения"""
+    """Инлайн-клавиатура подтверждения (используется в нескольких местах)"""
     keyboard = [
         [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm")],
         [InlineKeyboardButton("✏️ Изменить", callback_data="edit")],
