@@ -1,15 +1,23 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""
+Обработчики для раздела "Управление платежами" (администратор)
+Просмотр запросов на выплату, подтверждение/отклонение, уведомление продавцов.
+"""
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from database import db
 from config import config
 from keyboards import get_admin_menu
 from backup_decorator import send_backup_to_admin
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Состояния разговора
-MAIN_MENU, VIEW_REQUESTS, CONFIRM_PAYMENT = range(3)
+MAIN_MENU, VIEW_REQUEST, CONFIRM_PAYMENT = range(3)
 
 async def admin_payments_start(update: Update, context):
     """Главное меню управления платежами"""
@@ -19,33 +27,18 @@ async def admin_payments_start(update: Update, context):
         await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
     
-    # Получаем статистику по платежам
+    # Получаем статистику
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Новые запросы на выплату
-        cursor.execute("""
-            SELECT COUNT(*) FROM payment_requests 
-            WHERE status = 'pending'
-        """)
+        cursor.execute("SELECT COUNT(*) FROM payment_requests WHERE status = 'pending'")
         pending_count = cursor.fetchone()[0]
-        
-        # Общая сумма ожидающих выплат
-        cursor.execute("""
-            SELECT SUM(amount) FROM payment_requests 
-            WHERE status = 'pending'
-        """)
-        pending_sum = cursor.fetchone()[0] or 0
-        
-        # Подтверждено сегодня
-        cursor.execute("""
-            SELECT COUNT(*) FROM payment_requests 
-            WHERE status = 'approved' AND date(approved_at) = date('now')
-        """)
+        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM payment_requests WHERE status = 'pending'")
+        pending_sum = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM payment_requests WHERE status = 'approved' AND date(approved_at) = date('now')")
         approved_today = cursor.fetchone()[0]
     
     keyboard = [
-        [InlineKeyboardButton(f"🟡 Новые запросы ({pending_count})", callback_data="payments_pending")],
+        [InlineKeyboardButton(f"🟡 Ожидающие запросы ({pending_count})", callback_data="payments_pending")],
         [InlineKeyboardButton("📋 История платежей", callback_data="payments_history")],
         [InlineKeyboardButton("📊 Статистика", callback_data="payments_stats")],
         [InlineKeyboardButton("🔙 Назад", callback_data="payments_back")]
@@ -60,11 +53,10 @@ async def admin_payments_start(update: Update, context):
         f"Выберите действие:",
         reply_markup=reply_markup
     )
-    
     return MAIN_MENU
 
 async def payments_pending(update: Update, context):
-    """Просмотр ожидающих запросов на выплату"""
+    """Показать список ожидающих запросов"""
     query = update.callback_query
     await query.answer()
     
@@ -82,7 +74,7 @@ async def payments_pending(update: Update, context):
     
     if not requests:
         await query.edit_message_text(
-            "📭 Нет ожидающих запросов на выплату",
+            "📭 Нет ожидающих запросов",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Назад", callback_data="payments_back_to_menu")
             ]])
@@ -91,11 +83,10 @@ async def payments_pending(update: Update, context):
     
     text = "🟡 Ожидающие запросы на выплату:\n\n"
     keyboard = []
-    
     total_sum = 0
     for req in requests:
         text += f"📋 {req['request_number']}\n"
-        text += f"   Продавец: {req['seller_code']} - {req['full_name']}\n"
+        text += f"   Продавец: {req['seller_code']} - {req['full_name'][:20]}\n"
         text += f"   Сумма: {req['amount']} руб\n"
         text += f"   от {req['created_at'][:16]}\n\n"
         total_sum += req['amount']
@@ -105,19 +96,14 @@ async def payments_pending(update: Update, context):
         )])
     
     text += f"💵 Всего к выплате: {total_sum} руб\n\n"
-    text += "Выберите запрос для подтверждения:"
+    text += "Выберите запрос для обработки:"
     
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="payments_back_to_menu")])
-    
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    
-    return VIEW_REQUESTS
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    return VIEW_REQUEST
 
 async def payment_view(update: Update, context):
-    """Просмотр деталей конкретного запроса"""
+    """Детальный просмотр конкретного запроса"""
     query = update.callback_query
     await query.answer()
     
@@ -128,23 +114,19 @@ async def payment_view(update: Update, context):
         cursor = conn.cursor()
         cursor.execute("""
             SELECT pr.*, s.seller_code, s.full_name,
-                   sd.total_debt, sp.pending_amount
+                   COALESCE(sd.total_debt, 0) as total_debt,
+                   COALESCE(sp.pending_amount, 0) as pending_amount
             FROM payment_requests pr
             JOIN sellers s ON pr.seller_id = s.id
-            JOIN seller_debt sd ON s.id = sd.seller_id
-            JOIN seller_pending sp ON s.id = sp.seller_id
+            LEFT JOIN seller_debt sd ON s.id = sd.seller_id
+            LEFT JOIN seller_pending sp ON s.id = sp.seller_id
             WHERE pr.id = ?
         """, (payment_id,))
         payment = cursor.fetchone()
     
     if not payment:
-        await query.edit_message_text(
-            "❌ Запрос не найден",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="payments_pending")
-            ]])
-        )
-        return VIEW_REQUESTS
+        await query.edit_message_text("❌ Запрос не найден")
+        return MAIN_MENU
     
     text = f"📋 Запрос на выплату\n\n"
     text += f"Номер: {payment['request_number']}\n"
@@ -170,80 +152,90 @@ async def payment_view(update: Update, context):
 
 @send_backup_to_admin("подтверждение выплаты")
 async def payment_confirm(update: Update, context):
-    """Подтверждение выплаты"""
+    """Подтверждение выплаты – обновление БД и уведомление продавца"""
     query = update.callback_query
     await query.answer()
     
     payment_id = context.user_data.get('current_payment_id')
-    
     if not payment_id:
         await query.edit_message_text("❌ Ошибка: запрос не найден")
-        return ConversationHandler.END
+        return MAIN_MENU
     
     try:
         with db.get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Получаем информацию о платеже
+            # Получаем данные запроса
             cursor.execute("""
-                SELECT pr.*, s.id as seller_id
+                SELECT pr.*, s.telegram_id, s.seller_code
                 FROM payment_requests pr
                 JOIN sellers s ON pr.seller_id = s.id
                 WHERE pr.id = ?
             """, (payment_id,))
             payment = cursor.fetchone()
-            
             if not payment:
                 await query.edit_message_text("❌ Запрос не найден")
-                return ConversationHandler.END
+                return MAIN_MENU
+            
+            if payment['status'] != 'pending':
+                await query.edit_message_text("❌ Запрос уже обработан")
+                return MAIN_MENU
             
             # Обновляем статус запроса
             cursor.execute("""
-                UPDATE payment_requests 
+                UPDATE payment_requests
                 SET status = 'approved', approved_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (payment_id,))
             
-            # Уменьшаем общий долг продавца
-            cursor.execute("""
-                UPDATE seller_debt 
-                SET total_debt = total_debt - ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE seller_id = ?
-            """, (payment['amount'], payment['seller_id']))
-            
             # Уменьшаем сумму к переводу
             cursor.execute("""
-                UPDATE seller_pending 
-                SET pending_amount = pending_amount - ?,
-                    updated_at = CURRENT_TIMESTAMP
+                UPDATE seller_pending
+                SET pending_amount = pending_amount - ?
                 WHERE seller_id = ?
             """, (payment['amount'], payment['seller_id']))
             
-            # Получаем обновленные данные для отчета
+            # Уменьшаем общий долг за товар
             cursor.execute("""
-                SELECT total_debt, pending_amount 
-                FROM seller_debt sd
-                JOIN seller_pending sp ON sd.seller_id = sp.seller_id
-                WHERE sd.seller_id = ?
-            """, (payment['seller_id'],))
-            new_state = cursor.fetchone()
+                UPDATE seller_debt
+                SET total_debt = total_debt - ?
+                WHERE seller_id = ?
+            """, (payment['amount'], payment['seller_id']))
+            
+            # Получаем новые значения для уведомления
+            cursor.execute("SELECT pending_amount FROM seller_pending WHERE seller_id = ?", (payment['seller_id'],))
+            new_pending = cursor.fetchone()[0]
+            cursor.execute("SELECT total_debt FROM seller_debt WHERE seller_id = ?", (payment['seller_id'],))
+            new_debt = cursor.fetchone()[0]
         
+        # Уведомляем админа (сообщение уже отредактировано)
         await query.edit_message_text(
             f"✅ Выплата подтверждена!\n\n"
-            f"Номер запроса: {payment['request_number']}\n"
+            f"Запрос: {payment['request_number']}\n"
             f"Сумма: {payment['amount']} руб\n"
-            f"Продавец: {payment['seller_code']}\n\n"
-            f"💰 Новое состояние продавца:\n"
-            f"• Долг за товар: {new_state['total_debt']} руб\n"
-            f"• Сумма к переводу: {new_state['pending_amount']} руб",
+            f"Продавец: {payment['seller_code']}\n"
+            f"Новый долг продавца: {new_debt} руб\n"
+            f"Новая сумма к переводу: {new_pending} руб",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 К запросам", callback_data="payments_pending")
             ]])
         )
         
+        # Уведомляем продавца
+        if payment['telegram_id']:
+            try:
+                await context.bot.send_message(
+                    chat_id=payment['telegram_id'],
+                    text=f"✅ Администратор подтвердил получение денег!\n\n"
+                         f"Сумма: {payment['amount']} руб\n"
+                         f"Номер запроса: {payment['request_number']}\n"
+                         f"Ваш новый долг: {new_debt} руб\n"
+                         f"Сумма к переводу: {new_pending} руб"
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить продавца {payment['telegram_id']}: {e}")
+        
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+        await query.edit_message_text(f"❌ Ошибка: {str(e)}")
     
     context.user_data.clear()
     return MAIN_MENU
@@ -254,38 +246,56 @@ async def payment_reject(update: Update, context):
     await query.answer()
     
     payment_id = context.user_data.get('current_payment_id')
+    if not payment_id:
+        await query.edit_message_text("❌ Ошибка: запрос не найден")
+        return MAIN_MENU
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            UPDATE payment_requests 
+            SELECT pr.request_number, s.telegram_id, s.seller_code
+            FROM payment_requests pr
+            JOIN sellers s ON pr.seller_id = s.id
+            WHERE pr.id = ?
+        """, (payment_id,))
+        payment = cursor.fetchone()
+        
+        cursor.execute("""
+            UPDATE payment_requests
             SET status = 'rejected'
             WHERE id = ?
         """, (payment_id,))
-        
-        cursor.execute("SELECT request_number FROM payment_requests WHERE id = ?", (payment_id,))
-        req_number = cursor.fetchone()[0]
     
     await query.edit_message_text(
-        f"❌ Запрос {req_number} отклонен",
+        f"❌ Запрос {payment['request_number']} отклонён",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 К запросам", callback_data="payments_pending")
         ]])
     )
     
+    if payment['telegram_id']:
+        try:
+            await context.bot.send_message(
+                chat_id=payment['telegram_id'],
+                text=f"❌ Ваш запрос на выплату {payment['request_number']} был отклонён администратором.\n"
+                     f"Обратитесь к администратору для уточнения причин."
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить продавца {payment['telegram_id']}: {e}")
+    
     context.user_data.clear()
     return MAIN_MENU
 
 async def payments_history(update: Update, context):
-    """История платежей"""
+    """История платежей (последние 20)"""
     query = update.callback_query
     await query.answer()
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT pr.request_number, pr.amount, pr.status, pr.created_at,
-                   pr.approved_at, s.seller_code, s.full_name
+            SELECT pr.request_number, pr.amount, pr.status, pr.created_at, pr.approved_at,
+                   s.seller_code, s.full_name
             FROM payment_requests pr
             JOIN sellers s ON pr.seller_id = s.id
             ORDER BY pr.created_at DESC
@@ -295,29 +305,22 @@ async def payments_history(update: Update, context):
     
     if not history:
         await query.edit_message_text(
-            "📭 История платежей пуста",
+            "📭 История пуста",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("🔙 Назад", callback_data="payments_back_to_menu")
             ]])
         )
         return MAIN_MENU
     
-    text = "📋 История платежей (последние 20):\n\n"
-    
-    for item in history:
+    text = "📋 Последние 20 запросов:\n\n"
+    for h in history:
         status_emoji = {
             'pending': '🟡',
             'approved': '✅',
             'rejected': '❌'
-        }.get(item['status'], '⚪')
-        
-        date_str = item['approved_at'][:16] if item['approved_at'] else item['created_at'][:16]
-        text += f"{status_emoji} {item['request_number']}\n"
-        text += f"   Продавец: {item['seller_code']} - {item['full_name'][:15]}\n"
-        text += f"   Сумма: {item['amount']} руб\n"
-        text += f"   {date_str}\n\n"
-    
-    text += "✅ - подтвержден, 🟡 - ожидает, ❌ - отклонен"
+        }.get(h['status'], '⚪')
+        date = h['approved_at'][:16] if h['approved_at'] else h['created_at'][:16]
+        text += f"{status_emoji} {h['request_number']} - {h['seller_code']}: {h['amount']} руб ({date})\n"
     
     await query.edit_message_text(
         text,
@@ -334,44 +337,41 @@ async def payments_stats(update: Update, context):
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Общая статистика
         cursor.execute("""
-            SELECT 
-                COUNT(*) as total_requests,
-                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved_count,
-                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending_count,
-                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected_count,
+            SELECT
+                COUNT(*) as total,
+                SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved,
+                SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) as pending,
+                SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) as rejected,
                 SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END) as total_approved
             FROM payment_requests
         """)
         stats = cursor.fetchone()
         
-        # Статистика по продавцам
         cursor.execute("""
             SELECT s.seller_code, s.full_name,
-                   COUNT(pr.id) as requests_count,
-                   SUM(CASE WHEN pr.status = 'approved' THEN pr.amount ELSE 0 END) as total_paid
+                   COUNT(pr.id) as requests,
+                   SUM(pr.amount) as total
             FROM sellers s
-            LEFT JOIN payment_requests pr ON s.id = pr.seller_id
+            LEFT JOIN payment_requests pr ON s.id = pr.seller_id AND pr.status = 'approved'
             GROUP BY s.id
-            HAVING requests_count > 0
-            ORDER BY total_paid DESC
+            HAVING requests > 0
+            ORDER BY total DESC
             LIMIT 5
         """)
         top_sellers = cursor.fetchall()
     
     text = "📊 Статистика платежей\n\n"
-    text += f"Всего запросов: {stats['total_requests'] or 0}\n"
-    text += f"✅ Подтверждено: {stats['approved_count'] or 0}\n"
-    text += f"🟡 Ожидает: {stats['pending_count'] or 0}\n"
-    text += f"❌ Отклонено: {stats['rejected_count'] or 0}\n"
-    text += f"💵 Выплачено всего: {stats['total_approved'] or 0} руб\n\n"
+    text += f"Всего запросов: {stats['total']}\n"
+    text += f"✅ Подтверждено: {stats['approved']}\n"
+    text += f"🟡 Ожидает: {stats['pending']}\n"
+    text += f"❌ Отклонено: {stats['rejected']}\n"
+    text += f"💵 Выплачено всего: {stats['total_approved']} руб\n\n"
     
     if top_sellers:
         text += "🏆 Топ продавцов по выплатам:\n"
-        for seller in top_sellers:
-            text += f"• {seller['seller_code']} - {seller['full_name'][:15]}: {seller['total_paid']} руб\n"
+        for s in top_sellers:
+            text += f"• {s['seller_code']} - {s['full_name'][:15]}: {s['total']} руб\n"
     
     await query.edit_message_text(
         text,
@@ -386,21 +386,18 @@ async def back_to_menu(update: Update, context):
     query = update.callback_query
     await query.answer()
     
-    # Получаем обновленную статистику
+    # Получаем свежую статистику
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM payment_requests WHERE status = 'pending'")
         pending_count = cursor.fetchone()[0]
-        cursor.execute("SELECT SUM(amount) FROM payment_requests WHERE status = 'pending'")
-        pending_sum = cursor.fetchone()[0] or 0
-        cursor.execute("""
-            SELECT COUNT(*) FROM payment_requests 
-            WHERE status = 'approved' AND date(approved_at) = date('now')
-        """)
+        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM payment_requests WHERE status = 'pending'")
+        pending_sum = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM payment_requests WHERE status = 'approved' AND date(approved_at) = date('now')")
         approved_today = cursor.fetchone()[0]
     
     keyboard = [
-        [InlineKeyboardButton(f"🟡 Новые запросы ({pending_count})", callback_data="payments_pending")],
+        [InlineKeyboardButton(f"🟡 Ожидающие запросы ({pending_count})", callback_data="payments_pending")],
         [InlineKeyboardButton("📋 История платежей", callback_data="payments_history")],
         [InlineKeyboardButton("📊 Статистика", callback_data="payments_stats")],
         [InlineKeyboardButton("🔙 В админ-меню", callback_data="payments_exit")]
@@ -415,7 +412,6 @@ async def back_to_menu(update: Update, context):
         f"Выберите действие:",
         reply_markup=reply_markup
     )
-    
     return MAIN_MENU
 
 async def exit_payments(update: Update, context):
@@ -427,10 +423,9 @@ async def exit_payments(update: Update, context):
         "Выход в главное меню",
         reply_markup=get_admin_menu()
     )
-    
     return ConversationHandler.END
 
-# Обработчик разговора для управления платежами
+# ConversationHandler для управления платежами
 admin_payments_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex('^💰 Управление платежами$'), admin_payments_start)],
     states={
@@ -442,7 +437,7 @@ admin_payments_conv = ConversationHandler(
             CallbackQueryHandler(exit_payments, pattern='^payments_back$'),
             CallbackQueryHandler(exit_payments, pattern='^payments_exit$')
         ],
-        VIEW_REQUESTS: [
+        VIEW_REQUEST: [
             CallbackQueryHandler(payment_view, pattern='^payment_view_'),
             CallbackQueryHandler(payments_pending, pattern='^payments_pending$'),
             CallbackQueryHandler(back_to_menu, pattern='^payments_back_to_menu$')
@@ -454,5 +449,5 @@ admin_payments_conv = ConversationHandler(
         ]
     },
     fallbacks=[CommandHandler('cancel', exit_payments)],
-    allow_reentry=True  # ← ВАЖНО: добавляем эту строку
+    allow_reentry=True
 )
