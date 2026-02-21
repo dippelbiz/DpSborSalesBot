@@ -22,19 +22,12 @@ async def admin_payments_start(update: Update, context):
         await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
     
-    # Получаем статистику по платежам
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Новые запросы на выплату
         cursor.execute("SELECT COUNT(*) FROM payment_requests WHERE status = 'pending'")
         pending_count = cursor.fetchone()[0]
-        
-        # Общая сумма ожидающих выплат
         cursor.execute("SELECT SUM(amount) FROM payment_requests WHERE status = 'pending'")
         pending_sum = cursor.fetchone()[0] or 0
-        
-        # Подтверждено сегодня
         cursor.execute("""
             SELECT COUNT(*) FROM payment_requests 
             WHERE status = 'approved' AND date(approved_at) = date('now')
@@ -190,7 +183,6 @@ async def payment_edit_start(update: Update, context):
         )
         return CONFIRM_PAYMENT
     
-    # Получаем информацию о запросе
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -297,7 +289,6 @@ async def payment_edit_confirm(update: Update, context):
         with db.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Получаем информацию о запросе и продавце
             cursor.execute("""
                 SELECT pr.request_number, s.telegram_id, s.seller_code, s.full_name
                 FROM payment_requests pr
@@ -310,14 +301,12 @@ async def payment_edit_confirm(update: Update, context):
                 await query.edit_message_text("❌ Запрос не найден")
                 return MAIN_MENU
             
-            # Обновляем сумму в запросе и статус
             cursor.execute("""
                 UPDATE payment_requests 
                 SET amount = ?, status = 'approved', approved_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (new_amount, payment_id))
             
-            # Уменьшаем общий долг продавца
             cursor.execute("""
                 UPDATE seller_debt 
                 SET total_debt = total_debt - ?,
@@ -325,7 +314,6 @@ async def payment_edit_confirm(update: Update, context):
                 WHERE seller_id = ?
             """, (new_amount, seller_id))
             
-            # Уменьшаем сумму к переводу
             cursor.execute("""
                 UPDATE seller_pending 
                 SET pending_amount = pending_amount - ?,
@@ -333,7 +321,6 @@ async def payment_edit_confirm(update: Update, context):
                 WHERE seller_id = ?
             """, (new_amount, seller_id))
         
-        # Отправляем уведомление продавцу
         if data['telegram_id']:
             try:
                 await context.bot.send_message(
@@ -384,7 +371,6 @@ async def payment_edit_cancel(update: Update, context):
     await query.answer()
     
     await query.edit_message_text("❌ Редактирование отменено.")
-    # Возвращаемся к деталям запроса
     await payment_view(update, context)
     return CONFIRM_PAYMENT
 
@@ -422,14 +408,12 @@ async def payment_confirm(update: Update, context):
                 await query.edit_message_text("❌ Запрос не найден")
                 return MAIN_MENU
             
-            # Обновляем статус запроса
             cursor.execute("""
                 UPDATE payment_requests 
                 SET status = 'approved', approved_at = CURRENT_TIMESTAMP
                 WHERE id = ?
             """, (payment_id,))
             
-            # Уменьшаем общий долг продавца
             cursor.execute("""
                 UPDATE seller_debt 
                 SET total_debt = total_debt - ?,
@@ -437,7 +421,6 @@ async def payment_confirm(update: Update, context):
                 WHERE seller_id = ?
             """, (payment['amount'], payment['seller_id']))
             
-            # Уменьшаем сумму к переводу
             cursor.execute("""
                 UPDATE seller_pending 
                 SET pending_amount = pending_amount - ?,
@@ -445,7 +428,6 @@ async def payment_confirm(update: Update, context):
                 WHERE seller_id = ?
             """, (payment['amount'], payment['seller_id']))
             
-            # Получаем обновлённые данные
             cursor.execute("""
                 SELECT total_debt, pending_amount 
                 FROM seller_debt sd
@@ -454,8 +436,7 @@ async def payment_confirm(update: Update, context):
             """, (payment['seller_id'],))
             new_state = cursor.fetchone()
         
-        # Отправляем уведомление продавцу
-        if payment.get('telegram_id'):
+        if payment['telegram_id']:
             try:
                 await context.bot.send_message(
                     chat_id=payment['telegram_id'],
@@ -506,7 +487,6 @@ async def payment_reject(update: Update, context):
         cursor.execute("SELECT request_number, seller_id FROM payment_requests WHERE id = ?", (payment_id,))
         data = cursor.fetchone()
     
-    # Отправляем уведомление продавцу
     if data:
         seller_tg_id = None
         with db.get_connection() as conn:
@@ -594,8 +574,6 @@ async def payments_stats(update: Update, context):
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Общая статистика
         cursor.execute("""
             SELECT 
                 COUNT(*) as total_requests,
@@ -607,7 +585,6 @@ async def payments_stats(update: Update, context):
         """)
         stats = cursor.fetchone()
         
-        # Статистика по продавцам
         cursor.execute("""
             SELECT s.seller_code, s.full_name,
                    COUNT(pr.id) as requests_count,
@@ -646,7 +623,6 @@ async def back_to_menu(update: Update, context):
     query = update.callback_query
     await query.answer()
     
-    # Получаем обновленную статистику
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM payment_requests WHERE status = 'pending'")
@@ -690,7 +666,6 @@ async def exit_payments(update: Update, context):
     
     return ConversationHandler.END
 
-# Обработчик разговора для управления платежами
 admin_payments_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex('^💰 Управление платежами$'), admin_payments_start)],
     states={
