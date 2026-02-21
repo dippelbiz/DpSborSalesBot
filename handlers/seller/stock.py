@@ -9,7 +9,7 @@
 """
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import MessageHandler, filters
+from telegram.ext import MessageHandler, CallbackQueryHandler, filters
 from database import db
 from config import config
 from keyboards import get_main_menu
@@ -88,5 +88,21 @@ async def stock_start(update: Update, context):
         parse_mode='Markdown'
     )
 
+async def handle_back_to_main(update: Update, context):
+    """Обработчик нажатия кнопки 'В меню' в разделе 'Остатки'."""
+    query = update.callback_query
+    await query.answer()
+    logger.info("handle_back_to_main called by user %s", update.effective_user.id)
+
+    await query.edit_message_text("Возврат в главное меню.")
+    await context.bot.send_message(
+        chat_id=update.effective_user.id,
+        text="Выберите действие:",
+        reply_markup=get_main_menu()
+    )
+
 # Обработчик для кнопки "Остатки"
 stock_handler = MessageHandler(filters.Regex('^📊 Остатки$'), stock_start)
+
+# Обработчик для кнопки "В меню" внутри сообщения остатков
+back_to_main_handler = CallbackQueryHandler(handle_back_to_main, pattern='^back_to_main$')
