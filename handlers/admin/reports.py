@@ -12,7 +12,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Состояния разговора
-MAIN_MENU, SELLER_REPORT, PERIOD_REPORT = range(3)
+MAIN_MENU, PERIOD_REPORT, SELLER_STOCK = range(3)
 
 async def reports_start(update: Update, context):
     """Главное меню отчетов"""
@@ -26,7 +26,7 @@ async def reports_start(update: Update, context):
         [InlineKeyboardButton("👥 По всем продавцам", callback_data="report_all_sellers")],
         [InlineKeyboardButton("💰 По продажам", callback_data="report_sales")],
         [InlineKeyboardButton("💳 По платежам", callback_data="report_payments")],
-        [InlineKeyboardButton("📦 По товарам", callback_data="report_products")],
+        [InlineKeyboardButton("📦 Остатки по складам", callback_data="report_stock")],
         [InlineKeyboardButton("🔙 Назад", callback_data="report_back")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -39,7 +39,7 @@ async def reports_start(update: Update, context):
     
     return MAIN_MENU
 
-# ==== ОТЧЕТ ПО ВСЕМ ПРОДАВЦАМ ====
+# ==== ОТЧЕТ ПО ВСЕМ ПРОДАВЦАМ (остаётся без изменений) ====
 async def report_all_sellers(update: Update, context):
     """Сводка по всем продавцам"""
     query = update.callback_query
@@ -47,7 +47,6 @@ async def report_all_sellers(update: Update, context):
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Общая информация по продавцам
         cursor.execute("""
             SELECT 
                 s.id,
@@ -66,7 +65,6 @@ async def report_all_sellers(update: Update, context):
         """)
         sellers = cursor.fetchall()
         
-        # Общие итоги
         cursor.execute("""
             SELECT 
                 COUNT(*) as total_sellers,
@@ -110,7 +108,7 @@ async def report_all_sellers(update: Update, context):
     )
     return MAIN_MENU
 
-# ==== ОТЧЕТ ПО ПРОДАЖАМ ====
+# ==== ОТЧЕТ ПО ПРОДАЖАМ (остаётся без изменений) ====
 async def report_sales(update: Update, context):
     """Меню выбора периода для отчета по продажам"""
     query = update.callback_query
@@ -140,7 +138,6 @@ async def sales_period(update: Update, context):
     
     period = query.data.replace('sales_', '')
     
-    # Определяем даты начала и конца
     today = datetime.now().date()
     if period == 'today':
         start_date = today
@@ -156,7 +153,6 @@ async def sales_period(update: Update, context):
         period_name = "эту неделю"
     elif period == 'month':
         start_date = today.replace(day=1)
-        # Первое число следующего месяца
         if today.month == 12:
             end_date = today.replace(year=today.year+1, month=1, day=1)
         else:
@@ -169,7 +165,6 @@ async def sales_period(update: Update, context):
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Общая статистика продаж
         cursor.execute("""
             SELECT 
                 COUNT(*) as total_sales,
@@ -180,7 +175,6 @@ async def sales_period(update: Update, context):
         """, (start_date, end_date))
         totals = cursor.fetchone()
         
-        # Продажи по продавцам
         cursor.execute("""
             SELECT 
                 s.seller_code,
@@ -196,7 +190,6 @@ async def sales_period(update: Update, context):
         """, (start_date, end_date))
         sellers_sales = cursor.fetchall()
         
-        # Продажи по товарам
         cursor.execute("""
             SELECT 
                 p.product_name,
@@ -237,7 +230,7 @@ async def sales_period(update: Update, context):
     )
     return MAIN_MENU
 
-# ==== ОТЧЕТ ПО ПЛАТЕЖАМ ====
+# ==== ОТЧЕТ ПО ПЛАТЕЖАМ (остаётся без изменений) ====
 async def report_payments(update: Update, context):
     """Отчет по платежам"""
     query = update.callback_query
@@ -245,7 +238,6 @@ async def report_payments(update: Update, context):
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Статистика по платежам
         cursor.execute("""
             SELECT 
                 COUNT(*) as total_requests,
@@ -257,7 +249,6 @@ async def report_payments(update: Update, context):
         """)
         stats = cursor.fetchone()
         
-        # Последние 10 платежей
         cursor.execute("""
             SELECT 
                 pr.request_number,
@@ -274,7 +265,6 @@ async def report_payments(update: Update, context):
         """)
         recent = cursor.fetchall()
         
-        # Платежи по продавцам (топ)
         cursor.execute("""
             SELECT 
                 s.seller_code,
@@ -319,84 +309,104 @@ async def report_payments(update: Update, context):
     )
     return MAIN_MENU
 
-# ==== ОТЧЕТ ПО ТОВАРАМ (ИСПРАВЛЕННАЯ ВЕРСИЯ) ====
-async def report_products(update: Update, context):
-    """Отчет по товарам (остатки по всем продавцам)"""
+# ==== НОВЫЙ ОТЧЕТ: ОСТАТКИ ПО СКЛАДАМ ====
+async def report_stock(update: Update, context):
+    """Меню выбора: список продавцов или общий остаток"""
     query = update.callback_query
     await query.answer()
     
-    try:
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            # Общие остатки по товарам
-            cursor.execute("""
-                SELECT 
-                    p.id,
-                    p.product_name,
-                    p.price,
-                    COALESCE(SUM(sp.quantity), 0) as total_quantity,
-                    COALESCE(SUM(sp.quantity * p.price), 0) as total_value
-                FROM products p
-                LEFT JOIN seller_products sp ON p.id = sp.product_id
-                WHERE p.is_active = 1
-                GROUP BY p.id
-                ORDER BY p.product_name
-            """)
-            products = cursor.fetchall()
-            
-            # Товары с нулевым остатком
-            cursor.execute("""
-                SELECT p.product_name
-                FROM products p
-                WHERE p.is_active = 1
-                AND NOT EXISTS (
-                    SELECT 1 FROM seller_products sp 
-                    WHERE sp.product_id = p.id AND sp.quantity > 0
-                )
-            """)
-            zero_stock = cursor.fetchall()
-        
-        if not products:
-            await query.edit_message_text(
-                "📭 Нет товаров",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")
-                ]])
-            )
-            return MAIN_MENU
-        
-        text = "📦 Отчет по товарам\n\n"
-        total_value_all = 0
-        for p in products:
-            text += f"• {p['product_name']}: {p['total_quantity']} упак на сумму {p['total_value']} руб (цена {p['price']} руб)\n"
-            total_value_all += p['total_value']
-        
-        text += f"\nОбщая стоимость товаров на складах: {total_value_all} руб\n"
-        
-        if zero_stock:
-            text += "\nТовары с нулевым остатком:\n"
-            for z in zero_stock:
-                text += f"• {z['product_name']}\n"
-        
-        keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Убираем Markdown, чтобы избежать проблем со спецсимволами в названиях товаров
-        await query.edit_message_text(
-            text,
-            reply_markup=reply_markup
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка в report_products: {e}")
-        await query.edit_message_text(
-            f"❌ Произошла ошибка: {str(e)}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")
-            ]])
-        )
+    # Получаем список всех активных продавцов
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, seller_code, full_name
+            FROM sellers
+            WHERE is_active = 1
+            ORDER BY seller_code
+        """)
+        sellers = cursor.fetchall()
     
-    return MAIN_MENU
+    text = "📦 **Остатки по складам**\n\nВыберите продавца для просмотра его остатков:"
+    keyboard = []
+    
+    for s in sellers:
+        keyboard.append([InlineKeyboardButton(
+            f"{s['seller_code']} - {s['full_name']}",
+            callback_data=f"seller_stock_{s['id']}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("📊 Всего остатков по складам", callback_data="total_stock")])
+    keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="report_back_to_menu")])
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    return SELLER_STOCK
+
+async def seller_stock(update: Update, context):
+    """Показать остатки конкретного продавца"""
+    query = update.callback_query
+    await query.answer()
+    
+    seller_id = int(query.data.replace('seller_stock_', ''))
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        # Получаем информацию о продавце
+        cursor.execute("SELECT seller_code, full_name FROM sellers WHERE id = ?", (seller_id,))
+        seller = cursor.fetchone()
+        if not seller:
+            await query.edit_message_text("❌ Продавец не найден")
+            return SELLER_STOCK
+        
+        # Получаем остатки товаров для этого продавца
+        cursor.execute("""
+            SELECT p.product_name, sp.quantity
+            FROM seller_products sp
+            JOIN products p ON sp.product_id = p.id
+            WHERE sp.seller_id = ? AND p.is_active = 1
+            ORDER BY p.product_name
+        """, (seller_id,))
+        products = cursor.fetchall()
+    
+    text = f"📦 **Остатки продавца {seller['seller_code']}**\n\n"
+    if products:
+        for p in products:
+            text += f"• {p['product_name']} — {p['quantity']} упак\n"
+    else:
+        text += "У продавца нет товаров на складе.\n"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="report_stock")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    return SELLER_STOCK
+
+async def total_stock(update: Update, context):
+    """Показать общие остатки по всем продавцам (суммарно по каждому товару)"""
+    query = update.callback_query
+    await query.answer()
+    
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT p.product_name, COALESCE(SUM(sp.quantity), 0) as total_quantity
+            FROM products p
+            LEFT JOIN seller_products sp ON p.id = sp.product_id
+            WHERE p.is_active = 1
+            GROUP BY p.id
+            ORDER BY p.product_name
+        """)
+        totals = cursor.fetchall()
+    
+    text = "📊 **Общие остатки по всем складам**\n\n"
+    for t in totals:
+        text += f"• {t['product_name']} — {t['total_quantity']} упак\n"
+    
+    keyboard = [[InlineKeyboardButton("🔙 Назад", callback_data="report_stock")]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    return SELLER_STOCK
 
 # ==== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====
 async def back_to_main_menu(update: Update, context):
@@ -408,7 +418,7 @@ async def back_to_main_menu(update: Update, context):
         [InlineKeyboardButton("👥 По всем продавцам", callback_data="report_all_sellers")],
         [InlineKeyboardButton("💰 По продажам", callback_data="report_sales")],
         [InlineKeyboardButton("💳 По платежам", callback_data="report_payments")],
-        [InlineKeyboardButton("📦 По товарам", callback_data="report_products")],
+        [InlineKeyboardButton("📦 Остатки по складам", callback_data="report_stock")],
         [InlineKeyboardButton("🔙 Назад", callback_data="report_back")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -440,12 +450,18 @@ admin_reports_conv = ConversationHandler(
             CallbackQueryHandler(report_all_sellers, pattern='^report_all_sellers$'),
             CallbackQueryHandler(report_sales, pattern='^report_sales$'),
             CallbackQueryHandler(report_payments, pattern='^report_payments$'),
-            CallbackQueryHandler(report_products, pattern='^report_products$'),
+            CallbackQueryHandler(report_stock, pattern='^report_stock$'),
             CallbackQueryHandler(back_to_main_menu, pattern='^report_back_to_menu$'),
             CallbackQueryHandler(exit_reports, pattern='^report_back$')
         ],
         PERIOD_REPORT: [
             CallbackQueryHandler(sales_period, pattern='^sales_'),
+            CallbackQueryHandler(back_to_main_menu, pattern='^report_back_to_menu$')
+        ],
+        SELLER_STOCK: [
+            CallbackQueryHandler(seller_stock, pattern='^seller_stock_'),
+            CallbackQueryHandler(total_stock, pattern='^total_stock$'),
+            CallbackQueryHandler(report_stock, pattern='^report_stock$'),
             CallbackQueryHandler(back_to_main_menu, pattern='^report_back_to_menu$')
         ]
     },
