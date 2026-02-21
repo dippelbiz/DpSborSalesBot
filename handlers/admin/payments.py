@@ -7,12 +7,9 @@ from database import db
 from config import config
 from keyboards import get_admin_menu
 from backup_decorator import send_backup_to_admin
-import logging
-
-logger = logging.getLogger(__name__)
 
 # Состояния разговора
-MAIN_MENU, VIEW_REQUESTS, CONFIRM_PAYMENT, EDITING_AMOUNT = range(4)
+MAIN_MENU, VIEW_REQUESTS, CONFIRM_PAYMENT, EDIT_AMOUNT = range(4)
 
 async def admin_payments_start(update: Update, context):
     """Главное меню управления платежами"""
@@ -22,16 +19,12 @@ async def admin_payments_start(update: Update, context):
         await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
     
-    # Получаем статистику по платежам
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        
         cursor.execute("SELECT COUNT(*) FROM payment_requests WHERE status = 'pending'")
         pending_count = cursor.fetchone()[0]
-        
         cursor.execute("SELECT SUM(amount) FROM payment_requests WHERE status = 'pending'")
         pending_sum = cursor.fetchone()[0] or 0
-        
         cursor.execute("""
             SELECT COUNT(*) FROM payment_requests 
             WHERE status = 'approved' AND date(approved_at) = date('now')
@@ -54,7 +47,6 @@ async def admin_payments_start(update: Update, context):
         f"Выберите действие:",
         reply_markup=reply_markup
     )
-    
     return MAIN_MENU
 
 async def payments_pending(update: Update, context):
@@ -107,7 +99,6 @@ async def payments_pending(update: Update, context):
         text,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    
     return VIEW_REQUESTS
 
 async def payment_view(update: Update, context):
@@ -154,7 +145,7 @@ async def payment_view(update: Update, context):
     
     keyboard = [
         [InlineKeyboardButton("✅ Подтвердить выплату", callback_data="payment_confirm")],
-        [InlineKeyboardButton("✏️ Редактировать сумму", callback_data="payment_edit")],  # Новая кнопка
+        [InlineKeyboardButton("✏️ Редактировать сумму", callback_data="payment_edit")],  # новая кнопка
         [InlineKeyboardButton("❌ Отклонить", callback_data="payment_reject")],
         [InlineKeyboardButton("🔙 Назад", callback_data="payments_pending")]
     ]
@@ -172,241 +163,164 @@ async def payment_edit_start(update: Update, context):
     payment_id = context.user_data.get('current_payment_id')
     if not payment_id:
         await query.edit_message_text("❌ Ошибка: запрос не найден")
-        return VIEW_REQUESTS
+        return CONFIRM_PAYMENT
     
-    # Получаем информацию о запросе и продавце для отображения
+    # Получаем текущую сумму и ограничения
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT pr.amount, s.pending_amount, s.seller_code
+            SELECT pr.amount, sp.pending_amount, s.seller_code
             FROM payment_requests pr
             JOIN sellers s ON pr.seller_id = s.id
+            JOIN seller_pending sp ON s.id = sp.seller_id
             WHERE pr.id = ?
         """, (payment_id,))
-        data = cursor.fetchone()
-        if not data:
-            await query.edit_message_text("❌ Запрос не найден")
-            return VIEW_REQUESTS
+        row = cursor.fetchone()
     
-    context.user_data['edit_original_amount'] = data['amount']
-    max_amount = data['pending_amount']  # сумма к переводу (максимум для редактирования)
-    context.user_data['edit_max_amount'] = max_amount
+    if not row:
+        await query.edit_message_text("❌ Данные не найдены")
+        return CONFIRM_PAYMENT
     
-    # Убираем клавиатуру и просим ввести новую сумму
+    context.user_data['original_amount'] = row['amount']
+    context.user_data['max_amount'] = row['pending_amount']  # максимальная сумма, которую можно подтвердить (не больше pending)
+    context.user_data['seller_code'] = row['seller_code']
+    
     await query.edit_message_text(
-        f"💰 Редактирование суммы выплаты\n\n"
-        f"Исходная сумма: {data['amount']} руб\n"
-        f"Доступно у продавца: {max_amount} руб\n\n"
-        f"Введите новую сумму (целое положительное число, не больше {max_amount}):",
-        reply_markup=None
+        f"✏️ Редактирование суммы выплаты\n\n"
+        f"Текущая сумма в запросе: {row['amount']} руб\n"
+        f"Максимально возможная (pending_amount): {row['pending_amount']} руб\n\n"
+        f"Введите новую сумму (целое положительное число, не больше {row['pending_amount']}):",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="payment_edit_cancel")
+        ]])
     )
-    return EDITING_AMOUNT
+    return EDIT_AMOUNT
 
 async def payment_edit_amount(update: Update, context):
     """Обработка ввода новой суммы"""
+    text = update.message.text
     user_id = update.effective_user.id
     if user_id not in config.ADMIN_IDS:
-        await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
     
-    text = update.message.text.strip()
-    
     try:
-        amount = int(text)
-        if amount <= 0:
+        new_amount = int(text)
+        if new_amount <= 0:
             raise ValueError
     except ValueError:
         await update.message.reply_text(
-            "❌ Ошибка: введите целое положительное число.\n"
-            "Попробуйте снова:",
+            "❌ Введите целое положительное число.\nПопробуйте снова:",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Отмена", callback_data="payment_cancel_edit")
+                InlineKeyboardButton("❌ Отмена", callback_data="payment_edit_cancel")
             ]])
         )
-        return EDITING_AMOUNT
+        return EDIT_AMOUNT
     
-    max_amount = context.user_data.get('edit_max_amount')
-    if amount > max_amount:
+    max_amount = context.user_data.get('max_amount', 0)
+    if new_amount > max_amount:
         await update.message.reply_text(
-            f"❌ Сумма не может превышать доступную ({max_amount} руб).\n"
-            "Попробуйте снова:",
+            f"❌ Сумма не может превышать {max_amount} руб (текущая сумма к переводу).\nПопробуйте снова:",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Отмена", callback_data="payment_cancel_edit")
+                InlineKeyboardButton("❌ Отмена", callback_data="payment_edit_cancel")
             ]])
         )
-        return EDITING_AMOUNT
+        return EDIT_AMOUNT
     
-    context.user_data['edit_new_amount'] = amount
+    context.user_data['new_amount'] = new_amount
+    original = context.user_data['original_amount']
     
     keyboard = [
-        [InlineKeyboardButton("✅ Подтвердить", callback_data="payment_edit_confirm")],
-        [InlineKeyboardButton("✏️ Изменить", callback_data="payment_edit_again")],
-        [InlineKeyboardButton("❌ Отмена", callback_data="payment_cancel_edit")]
+        [InlineKeyboardButton("✅ Подтвердить изменение", callback_data="payment_edit_confirm")],
+        [InlineKeyboardButton("✏️ Изменить снова", callback_data="payment_edit_again")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="payment_edit_cancel")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
         f"Проверьте новую сумму:\n\n"
-        f"Сумма: {amount} руб\n\n"
-        f"После подтверждения исходный запрос будет отклонён,\n"
-        f"и продавцу будет зачислена новая сумма.",
+        f"Было: {original} руб\n"
+        f"Стало: {new_amount} руб\n\n"
+        f"После подтверждения запрос будет обновлён.",
         reply_markup=reply_markup
     )
-    return EDITING_AMOUNT
+    return EDIT_AMOUNT
 
-@send_backup_to_admin("редактирование и подтверждение выплаты")
+@send_backup_to_admin("изменение суммы выплаты")
 async def payment_edit_confirm(update: Update, context):
-    """Подтверждение отредактированной суммы – отклоняем старый запрос, создаём новую выплату."""
+    """Подтверждение изменения суммы запроса"""
     query = update.callback_query
     await query.answer()
-    logger.info("payment_edit_confirm called")
     
     payment_id = context.user_data.get('current_payment_id')
-    new_amount = context.user_data.get('edit_new_amount')
-    original_amount = context.user_data.get('edit_original_amount')
+    new_amount = context.user_data.get('new_amount')
     
     if not payment_id or not new_amount:
         await query.edit_message_text("❌ Ошибка: данные не найдены")
-        return MAIN_MENU
+        return CONFIRM_PAYMENT
     
-    try:
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            
-            # Получаем информацию о запросе и продавце
-            cursor.execute("""
-                SELECT pr.seller_id, pr.request_number, s.seller_code, s.full_name,
-                       sd.total_debt, sp.pending_amount
-                FROM payment_requests pr
-                JOIN sellers s ON pr.seller_id = s.id
-                JOIN seller_debt sd ON s.id = sd.seller_id
-                JOIN seller_pending sp ON s.id = sp.seller_id
-                WHERE pr.id = ?
-            """, (payment_id,))
-            data = cursor.fetchone()
-            if not data:
-                await query.edit_message_text("❌ Запрос не найден")
-                return MAIN_MENU
-            
-            seller_id = data['seller_id']
-            seller_code = data['seller_code']
-            full_name = data['full_name']
-            old_request_number = data['request_number']
-            
-            # Отклоняем старый запрос (меняем статус)
-            cursor.execute("""
-                UPDATE payment_requests
-                SET status = 'rejected'
-                WHERE id = ?
-            """, (payment_id,))
-            
-            # Создаём новый подтверждённый запрос на новую сумму
-            from datetime import datetime
-            date_str = datetime.now().strftime("%d%m")
-            cursor.execute("""
-                SELECT COUNT(*) FROM payment_requests
-                WHERE seller_id = ? AND date(created_at) = date('now')
-            """, (seller_id,))
-            count = cursor.fetchone()[0] + 1
-            new_request_number = f"В-{seller_code}-{date_str}-{count:03d}"
-            
-            cursor.execute("""
-                INSERT INTO payment_requests (request_number, seller_id, amount, status, created_at, approved_at)
-                VALUES (?, ?, ?, 'approved', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-            """, (new_request_number, seller_id, new_amount))
-            
-            # Уменьшаем общий долг продавца
-            cursor.execute("""
-                UPDATE seller_debt
-                SET total_debt = total_debt - ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE seller_id = ?
-            """, (new_amount, seller_id))
-            
-            # Уменьшаем сумму к переводу
-            cursor.execute("""
-                UPDATE seller_pending
-                SET pending_amount = pending_amount - ?,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE seller_id = ?
-            """, (new_amount, seller_id))
-            
-            # Получаем обновлённые данные для уведомления
-            cursor.execute("""
-                SELECT total_debt, pending_amount
-                FROM seller_debt sd
-                JOIN seller_pending sp ON sd.seller_id = sp.seller_id
-                WHERE sd.seller_id = ?
-            """, (seller_id,))
-            new_state = cursor.fetchone()
-        
-        # Отправляем уведомление админу
-        await query.edit_message_text(
-            f"✅ Выплата подтверждена с изменённой суммой!\n\n"
-            f"Исходный запрос: {old_request_number} (сумма {original_amount} руб) отклонён.\n"
-            f"Новый запрос: {new_request_number}\n"
-            f"Сумма: {new_amount} руб\n"
-            f"Продавец: {seller_code} - {full_name}\n\n"
-            f"💰 Новое состояние продавца:\n"
-            f"• Долг за товар: {new_state['total_debt']} руб\n"
-            f"• Сумма к переводу: {new_state['pending_amount']} руб",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔙 К запросам", callback_data="payments_pending")
-            ]])
-        )
-        
-        # Отправляем уведомление продавцу (если у него есть telegram_id)
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT telegram_id FROM sellers WHERE id = ?", (seller_id,))
-            seller_tg = cursor.fetchone()
-            if seller_tg and seller_tg['telegram_id']:
-                try:
-                    await context.bot.send_message(
-                        chat_id=seller_tg['telegram_id'],
-                        text=f"✅ Администратор подтвердил выплату!\n\n"
-                             f"Сумма: {new_amount} руб\n"
-                             f"Номер запроса: {new_request_number}\n\n"
-                             f"Ваш текущий долг: {new_state['total_debt']} руб\n"
-                             f"Сумма к переводу: {new_state['pending_amount']} руб"
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to notify seller {seller_id}: {e}")
-        
-    except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE payment_requests
+            SET amount = ?
+            WHERE id = ?
+        """, (new_amount, payment_id))
     
-    context.user_data.clear()
-    return MAIN_MENU
-
-async def payment_edit_again(update: Update, context):
-    """Вернуться к вводу суммы (изменить ещё раз)"""
-    query = update.callback_query
-    await query.answer()
-    logger.info("payment_edit_again called")
-    
-    max_amount = context.user_data.get('edit_max_amount')
     await query.edit_message_text(
-        f"💰 Введите новую сумму (не больше {max_amount}):",
+        f"✅ Сумма запроса обновлена.\nНовая сумма: {new_amount} руб."
+    )
+    # Возвращаемся к просмотру деталей запроса
+    # Для этого нужно заново вызвать payment_view, но у нас есть payment_id в контексте
+    # Создадим новый callback с payment_view_
+    # Можно просто вызвать функцию payment_view, передав update как callback
+    # Но проще отправить сообщение и предложить вернуться к списку
+    await context.bot.send_message(
+        chat_id=update.effective_user.id,
+        text="Вернуться к списку запросов?",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Отмена", callback_data="payment_cancel_edit")
+            InlineKeyboardButton("🔙 К списку", callback_data="payments_pending")
         ]])
     )
-    return EDITING_AMOUNT
+    # Очищаем данные, связанные с редактированием
+    context.user_data.pop('new_amount', None)
+    context.user_data.pop('original_amount', None)
+    context.user_data.pop('max_amount', None)
+    return VIEW_REQUESTS
 
-async def payment_cancel_edit(update: Update, context):
-    """Отмена редактирования, возврат к деталям запроса"""
+async def payment_edit_again(update: Update, context):
+    """Повторить ввод суммы"""
     query = update.callback_query
     await query.answer()
-    logger.info("payment_cancel_edit called")
     
-    # Возвращаемся к просмотру запроса
-    await payment_view(update, context)
+    max_amount = context.user_data.get('max_amount', 0)
+    await query.edit_message_text(
+        f"✏️ Введите новую сумму (не больше {max_amount}):",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="payment_edit_cancel")
+        ]])
+    )
+    return EDIT_AMOUNT
+
+async def payment_edit_cancel(update: Update, context):
+    """Отмена редактирования"""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text("❌ Редактирование отменено.")
+    # Возвращаемся к деталям запроса
+    # Нужно перевызвать payment_view
+    # Для этого можно снова получить payment_id и вызвать функцию, но проще отправить кнопку назад
+    await context.bot.send_message(
+        chat_id=update.effective_user.id,
+        text="Вернуться к запросу?",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 К запросу", callback_data=f"payment_view_{context.user_data['current_payment_id']}")
+        ]])
+    )
     return CONFIRM_PAYMENT
 
 @send_backup_to_admin("подтверждение выплаты")
 async def payment_confirm(update: Update, context):
-    """Подтверждение выплаты без изменений"""
+    """Подтверждение выплаты (без изменения суммы)"""
     query = update.callback_query
     await query.answer()
     
@@ -419,9 +333,8 @@ async def payment_confirm(update: Update, context):
     try:
         with db.get_connection() as conn:
             cursor = conn.cursor()
-            
             cursor.execute("""
-                SELECT pr.*, s.id as seller_id, s.seller_code, s.full_name, s.telegram_id
+                SELECT pr.*, s.id as seller_id
                 FROM payment_requests pr
                 JOIN sellers s ON pr.seller_id = s.id
                 WHERE pr.id = ?
@@ -464,7 +377,7 @@ async def payment_confirm(update: Update, context):
             f"✅ Выплата подтверждена!\n\n"
             f"Номер запроса: {payment['request_number']}\n"
             f"Сумма: {payment['amount']} руб\n"
-            f"Продавец: {payment['seller_code']} - {payment['full_name']}\n\n"
+            f"Продавец: {payment['seller_code']}\n\n"
             f"💰 Новое состояние продавца:\n"
             f"• Долг за товар: {new_state['total_debt']} руб\n"
             f"• Сумма к переводу: {new_state['pending_amount']} руб",
@@ -473,22 +386,12 @@ async def payment_confirm(update: Update, context):
             ]])
         )
         
-        # Уведомляем продавца
-        if payment['telegram_id']:
-            try:
-                await context.bot.send_message(
-                    chat_id=payment['telegram_id'],
-                    text=f"✅ Администратор подтвердил выплату!\n\n"
-                         f"Сумма: {payment['amount']} руб\n"
-                         f"Номер запроса: {payment['request_number']}\n\n"
-                         f"Ваш текущий долг: {new_state['total_debt']} руб\n"
-                         f"Сумма к переводу: {new_state['pending_amount']} руб"
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify seller {payment['seller_id']}: {e}")
+        # Уведомление продавца (опционально)
+        # Здесь можно добавить отправку уведомления продавцу о подтверждении выплаты
+        # через контекст бота, если есть chat_id продавца
         
     except Exception as e:
-        await query.edit_message_text(f"❌ Ошибка: {e}")
+        await query.edit_message_text(f"❌ Ошибка: {str(e)}")
     
     context.user_data.clear()
     return MAIN_MENU
@@ -508,10 +411,8 @@ async def payment_reject(update: Update, context):
             WHERE id = ?
         """, (payment_id,))
         
-        cursor.execute("SELECT request_number, seller_id FROM payment_requests WHERE id = ?", (payment_id,))
-        data = cursor.fetchone()
-        req_number = data['request_number']
-        seller_id = data['seller_id']
+        cursor.execute("SELECT request_number FROM payment_requests WHERE id = ?", (payment_id,))
+        req_number = cursor.fetchone()[0]
     
     await query.edit_message_text(
         f"❌ Запрос {req_number} отклонен",
@@ -519,20 +420,6 @@ async def payment_reject(update: Update, context):
             InlineKeyboardButton("🔙 К запросам", callback_data="payments_pending")
         ]])
     )
-    
-    # Уведомляем продавца (опционально)
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT telegram_id FROM sellers WHERE id = ?", (seller_id,))
-        seller_tg = cursor.fetchone()
-        if seller_tg and seller_tg['telegram_id']:
-            try:
-                await context.bot.send_message(
-                    chat_id=seller_tg['telegram_id'],
-                    text=f"❌ Ваш запрос на выплату №{req_number} отклонён администратором."
-                )
-            except Exception as e:
-                logger.error(f"Failed to notify seller {seller_id}: {e}")
     
     context.user_data.clear()
     return MAIN_MENU
@@ -595,7 +482,6 @@ async def payments_stats(update: Update, context):
     
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        
         cursor.execute("""
             SELECT 
                 COUNT(*) as total_requests,
@@ -673,7 +559,6 @@ async def back_to_menu(update: Update, context):
         f"Выберите действие:",
         reply_markup=reply_markup
     )
-    
     return MAIN_MENU
 
 async def exit_payments(update: Update, context):
@@ -688,6 +573,7 @@ async def exit_payments(update: Update, context):
     
     return ConversationHandler.END
 
+# Обработчик разговора для управления платежами
 admin_payments_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex('^💰 Управление платежами$'), admin_payments_start)],
     states={
@@ -708,16 +594,14 @@ admin_payments_conv = ConversationHandler(
             CallbackQueryHandler(payment_confirm, pattern='^payment_confirm$'),
             CallbackQueryHandler(payment_edit_start, pattern='^payment_edit$'),
             CallbackQueryHandler(payment_reject, pattern='^payment_reject$'),
-            CallbackQueryHandler(payments_pending, pattern='^payments_pending$'),
-            CallbackQueryHandler(payment_cancel_edit, pattern='^payment_cancel_edit$')
+            CallbackQueryHandler(payments_pending, pattern='^payments_pending$')
         ],
-        EDITING_AMOUNT: [
+        EDIT_AMOUNT: [
             CallbackQueryHandler(payment_edit_confirm, pattern='^payment_edit_confirm$'),
             CallbackQueryHandler(payment_edit_again, pattern='^payment_edit_again$'),
-            CallbackQueryHandler(payment_cancel_edit, pattern='^payment_cancel_edit$'),
+            CallbackQueryHandler(payment_edit_cancel, pattern='^payment_edit_cancel$'),
             MessageHandler(filters.TEXT & ~filters.COMMAND, payment_edit_amount)
         ]
     },
-    fallbacks=[CommandHandler('cancel', exit_payments)],
-    allow_reentry=True
+    fallbacks=[CommandHandler('cancel', exit_payments)]
 )
