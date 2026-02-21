@@ -114,11 +114,27 @@ async def product_selected(update: Update, context):
     context.user_data['product_price'] = product['price']
     context.user_data['max_quantity'] = product['quantity']
 
+    # Убираем инлайн-клавиатуру, так как переходим к вводу текста
     await query.edit_message_text(
         f"Товар: {product['product_name']}\n"
         f"Цена: {product['price']} руб/упак\n"
         f"Доступно: {product['quantity']} упак\n\n"
         f"Введите количество проданных упаковок:",
+        reply_markup=None
+    )
+    # После этого бот будет ждать текстового ввода – клавиатура "Назад/Отмена" будет отправлена отдельно,
+    # но она уже есть в get_back_and_cancel_keyboard, которую мы используем в обработчике сообщений.
+    # В данном месте мы не отправляем клавиатуру, она появится, когда пользователь начнёт ввод,
+    # потому что обработчик quantity_entered использует get_back_and_cancel_keyboard при ошибках,
+    # но для первого запроса мы её не даём. Чтобы пользователь сразу видел кнопки, нужно отправить сообщение с клавиатурой.
+    # Лучше после редактирования отправить новое сообщение с клавиатурой. Но edit_message_text не может добавить обычную клавиатуру.
+    # Поэтому мы отредактируем сообщение, убрав инлайн, а затем следующим сообщением отправим запрос с reply-клавиатурой.
+    # Но так как у нас уже есть состояние ENTERING_QUANTITY, следующий шаг – ожидание сообщения, а клавиатуру мы можем отправить прямо сейчас отдельно.
+
+    # Отправим отдельное сообщение с запросом количества и reply-клавиатурой
+    await context.bot.send_message(
+        chat_id=update.effective_user.id,
+        text=f"Введите количество проданных упаковок:",
         reply_markup=get_back_and_cancel_keyboard()
     )
     return ENTERING_QUANTITY
@@ -204,7 +220,8 @@ async def confirm_sale(update: Update, context):
         avail = cursor.fetchone()[0]
         if avail < qty:
             await query.edit_message_text(
-                "❌ Ошибка: недостаточно товара. Возможно, остаток изменился. Попробуйте снова."
+                "❌ Ошибка: недостаточно товара. Возможно, остаток изменился. Попробуйте снова.",
+                reply_markup=None
             )
             return SELECTING_PRODUCT
 
@@ -234,7 +251,8 @@ async def confirm_sale(update: Update, context):
         f"Товар: {context.user_data['product_name']}\n"
         f"Количество: {qty} упак\n"
         f"Сумма: {total} руб\n"
-        f"Добавлено к переводу."
+        f"Добавлено к переводу.",
+        reply_markup=None
     )
 
     # Очищаем временные данные, но оставляем seller_id
@@ -259,6 +277,11 @@ async def change_qty(update: Update, context):
         f"Цена: {context.user_data['product_price']} руб/упак\n"
         f"Доступно: {context.user_data['max_quantity']} упак\n\n"
         f"Введите новое количество:",
+        reply_markup=None
+    )
+    await context.bot.send_message(
+        chat_id=update.effective_user.id,
+        text="Введите новое количество:",
         reply_markup=get_back_and_cancel_keyboard()
     )
     return ENTERING_QUANTITY
@@ -269,7 +292,7 @@ async def cancel_sale(update: Update, context):
     await query.answer()
     logger.info("cancel_sale called")
 
-    await query.edit_message_text("❌ Продажа отменена.")
+    await query.edit_message_text("❌ Продажа отменена.", reply_markup=None)
     await sales_start(update, context)
     return SELECTING_PRODUCT
 
