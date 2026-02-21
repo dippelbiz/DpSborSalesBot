@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 ENTERING_AMOUNT, CONFIRMING = range(2)
 
 async def payment_request_start(update: Update, context):
-    """Начало запроса выплаты – проверяем доступную сумму и запрашиваем сумму."""
     query = update.callback_query
     await query.answer()
     logger.info("payment_request_start called by user %s", update.effective_user.id)
@@ -41,7 +40,6 @@ async def payment_request_start(update: Update, context):
         context.user_data['seller_id'] = seller_id
         context.user_data['seller_code'] = seller_code
 
-        # Получаем текущую сумму к переводу
         cursor.execute("SELECT pending_amount FROM seller_pending WHERE seller_id = ?", (seller_id,))
         pending_row = cursor.fetchone()
         pending_amount = pending_row['pending_amount'] if pending_row else 0
@@ -59,7 +57,6 @@ async def payment_request_start(update: Update, context):
         )
         return ConversationHandler.END
 
-    # Убираем инлайн-кнопки и запрашиваем сумму
     await query.edit_message_text(
         f"💰 Доступно для перевода: {pending_amount} руб\n\n"
         f"Введите сумму, которую хотите перевести (целое число, не больше {pending_amount}):",
@@ -73,12 +70,10 @@ async def payment_request_start(update: Update, context):
     return ENTERING_AMOUNT
 
 async def amount_entered(update: Update, context):
-    """Обработка введённой суммы, показываем подтверждение."""
     text = update.message.text
     logger.info("amount_entered: %s", text)
 
     if text == '🔙 Назад':
-        # Возвращаемся в раздел "Остатки" (просто показываем главное меню, так как из остатков мы пришли)
         await update.message.reply_text(
             "Возврат в главное меню.",
             reply_markup=get_main_menu()
@@ -124,7 +119,6 @@ async def amount_entered(update: Update, context):
 
 @send_backup_to_admin("запрос выплаты")
 async def confirm_payment(update: Update, context):
-    """Подтверждение запроса – создаём запись в payment_requests."""
     query = update.callback_query
     await query.answer()
     logger.info("confirm_payment called")
@@ -133,20 +127,17 @@ async def confirm_payment(update: Update, context):
     seller_code = context.user_data['seller_code']
     amount = context.user_data['request_amount']
 
-    # Генерируем номер запроса
     today = datetime.now()
     date_str = today.strftime("%d%m")
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Получаем количество запросов продавца за сегодня
         cursor.execute("""
             SELECT COUNT(*) FROM payment_requests
             WHERE seller_id = ? AND date(created_at) = date('now')
         """, (seller_id,))
         count = cursor.fetchone()[0] + 1
-        request_number = f"В-{seller_code}-{date_str}-{count:03d}"  # В – выплата
+        request_number = f"В-{seller_code}-{date_str}-{count:03d}"
 
-        # Создаём запрос
         cursor.execute("""
             INSERT INTO payment_requests (request_number, seller_id, amount, status, created_at)
             VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)
@@ -163,11 +154,25 @@ async def confirm_payment(update: Update, context):
         text="Выберите следующее действие:",
         reply_markup=get_main_menu()
     )
+
+    # Уведомление админам
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"🟡 **Новый запрос на выплату**\n\n"
+                     f"Номер: {request_number}\n"
+                     f"Продавец: {seller_code}\n"
+                     f"Сумма: {amount} руб\n\n"
+                     f"Перейдите в раздел «💰 Управление платежами» для подтверждения."
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
+
     context.user_data.clear()
     return ConversationHandler.END
 
 async def change_amount(update: Update, context):
-    """Изменить сумму – возвращаемся к вводу."""
     query = update.callback_query
     await query.answer()
     logger.info("change_amount called")
@@ -185,7 +190,6 @@ async def change_amount(update: Update, context):
     return ENTERING_AMOUNT
 
 async def cancel_payment(update: Update, context):
-    """Отмена запроса."""
     query = update.callback_query
     await query.answer()
     logger.info("cancel_payment called")
@@ -199,7 +203,6 @@ async def cancel_payment(update: Update, context):
     context.user_data.clear()
     return ConversationHandler.END
 
-# ConversationHandler для запроса выплаты
 payment_conv = ConversationHandler(
     entry_points=[CallbackQueryHandler(payment_request_start, pattern='^request_payment$')],
     states={
