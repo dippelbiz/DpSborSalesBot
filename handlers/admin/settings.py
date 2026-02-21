@@ -7,9 +7,16 @@ from database import db
 from config import config
 from keyboards import get_admin_menu
 from backup_decorator import send_backup_to_admin
+import logging
+import io
+import json
+import sqlite3
+from backup import backup
 
-# Состояния разговора
-MAIN_MENU, ADD_SELLER_CODE, ADD_SELLER_NAME, ADD_SELLER_TG_ID, LIST_SELLERS, EDIT_SELLER, CONFIRM_DELETE, PRODUCTS_MENU, ADD_PRODUCT_NAME, ADD_PRODUCT_PRICE, ADD_PRODUCT_CONFIRM, EDIT_PRODUCT = range(12)
+logger = logging.getLogger(__name__)
+
+# Состояния разговора (добавлены BACKUP_MENU и WAITING_FOR_BACKUP_FILE)
+MAIN_MENU, ADD_SELLER_CODE, ADD_SELLER_NAME, ADD_SELLER_TG_ID, LIST_SELLERS, EDIT_SELLER, CONFIRM_DELETE, PRODUCTS_MENU, ADD_PRODUCT_NAME, ADD_PRODUCT_PRICE, ADD_PRODUCT_CONFIRM, EDIT_PRODUCT, BACKUP_MENU, WAITING_FOR_BACKUP_FILE = range(14)
 
 async def admin_settings_start(update: Update, context):
     """Главное меню настроек"""
@@ -19,12 +26,12 @@ async def admin_settings_start(update: Update, context):
         await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
     
-    # Очищаем контекст при входе в настройки
     context.user_data.clear()
     
     keyboard = [
         [InlineKeyboardButton("👥 Управление продавцами", callback_data="settings_sellers")],
         [InlineKeyboardButton("🏷️ Товары и цены", callback_data="settings_products")],
+        [InlineKeyboardButton("🔐 Бэкапы", callback_data="settings_backup")],
         [InlineKeyboardButton("🔙 Назад", callback_data="settings_back")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -38,7 +45,7 @@ async def admin_settings_start(update: Update, context):
     return MAIN_MENU
 
 # ============================================
-# УПРАВЛЕНИЕ ПРОДАВЦАМИ
+# УПРАВЛЕНИЕ ПРОДАВЦАМИ (без изменений)
 # ============================================
 
 async def settings_sellers(update: Update, context):
@@ -1191,7 +1198,195 @@ async def product_cancel(update: Update, context):
         )
     
     return MAIN_MENU
+# НОВЫЙ РАЗДЕЛ: БЭКАПЫ
+# ============================================
 
+async def settings_backup(update: Update, context):
+    """Меню управления бэкапами"""
+    query = update.callback_query
+    await query.answer()
+    
+    keyboard = [
+        [InlineKeyboardButton("📦 Создать бэкап вручную", callback_data="backup_create")],
+        [InlineKeyboardButton("📤 Загрузить бэкап", callback_data="backup_upload")],
+        [InlineKeyboardButton("🔙 Назад", callback_data="settings_back_to_main")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        "🔐 Управление бэкапами\n\n"
+        "Выберите действие:",
+        reply_markup=reply_markup
+    )
+    return BACKUP_MENU
+
+async def backup_create(update: Update, context):
+    """Создание ручного бэкапа и отправка файла администратору"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text("🔄 Создание бэкапа...")
+    
+    try:
+        # Генерируем JSON-бэкап
+        json_data = backup.create_backup_json()
+        filename = backup.get_backup_filename("manual_from_settings")
+        
+        # Отправляем файл в текущий чат
+        await context.bot.send_document(
+            chat_id=update.effective_user.id,
+            document=io.BytesIO(json_data.encode('utf-8')),
+            filename=filename,
+            caption="✅ Ручной бэкап создан"
+        )
+        
+        # Логируем действие
+        db.log_action(
+            user_id=update.effective_user.id,
+            user_role="admin",
+            action="manual_backup",
+            details=f"Backup created from settings: {filename}"
+        )
+        
+        # Возвращаемся в меню бэкапов
+        await settings_backup(update, context)
+        return BACKUP_MENU
+        
+    except Exception as e:
+        logger.error(f"Backup creation failed: {e}")
+        await query.edit_message_text(f"❌ Ошибка создания бэкапа: {e}")
+        return BACKUP_MENU
+
+async def backup_upload_start(update: Update, context):
+    """Начало загрузки бэкапа – просим прислать файл"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "📤 Отправьте JSON-файл с бэкапом.\n\n"
+        "После получения файла будет произведено восстановление базы данных (текущая БД будет сохранена как автоматический бэкап).",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("❌ Отмена", callback_data="backup_cancel")
+        ]])
+    )
+    return WAITING_FOR_BACKUP_FILE
+
+async def backup_file_received(update: Update, context):
+    """Обработка загруженного файла бэкапа"""
+    user_id = update.effective_user.id
+    
+    if user_id not in config.ADMIN_IDS:
+        await update.message.reply_text("⛔ Доступ запрещен")
+        return ConversationHandler.END
+    
+    document = update.message.document
+    if not document.file_name.endswith('.json'):
+        await update.message.reply_text(
+            "❌ Неверный формат. Отправьте JSON-файл.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="backup_cancel")
+            ]])
+        )
+        return WAITING_FOR_BACKUP_FILE
+    
+    await update.message.reply_text("🔄 Обработка файла...")
+    
+    try:
+        # Скачиваем файл
+        file = await document.get_file()
+        file_content = await file.download_as_bytearray()
+        data = json.loads(file_content.decode('utf-8'))
+        
+        # Создаём бэкап текущей БД перед восстановлением
+        current_backup = backup.create_backup_json()
+        current_filename = backup.get_backup_filename("before_restore")
+        await update.message.reply_document(
+            document=io.BytesIO(current_backup.encode('utf-8')),
+            filename=current_filename,
+            caption="📦 Автоматический бэкап перед восстановлением"
+        )
+        
+        # Восстанавливаем данные
+        conn = sqlite3.connect(config.DATABASE_PATH)
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA foreign_keys = OFF")
+        
+        # Очищаем все таблицы
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = cursor.fetchall()
+        for table in tables:
+            table_name = table[0]
+            if table_name != 'sqlite_sequence':
+                cursor.execute(f"DELETE FROM {table_name}")
+        
+        # Вставляем данные из бэкапа
+        restored = 0
+        for table_name, rows in data.items():
+            if table_name != 'sqlite_sequence' and rows:
+                columns = list(rows[0].keys())
+                placeholders = ','.join(['?'] * len(columns))
+                column_names = ','.join(columns)
+                for row in rows:
+                    values = [row[col] for col in columns]
+                    cursor.execute(
+                        f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})",
+                        values
+                    )
+                    restored += 1
+        
+        cursor.execute("PRAGMA foreign_keys = ON")
+        conn.commit()
+        conn.close()
+        
+        await update.message.reply_text(
+            f"✅ База данных успешно восстановлена из файла {document.file_name}\n"
+            f"Восстановлено записей: {restored}"
+        )
+        
+        # Логируем действие
+        db.log_action(
+            user_id=user_id,
+            user_role="admin",
+            action="restore_backup",
+            details=f"Restored from uploaded {document.file_name}"
+        )
+        
+        # Возвращаемся в меню настроек (или бэкапов)
+        keyboard = [
+            [InlineKeyboardButton("🔐 Управление бэкапами", callback_data="settings_backup")],
+            [InlineKeyboardButton("🔙 В главное меню", callback_data="settings_back")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "Выберите дальнейшее действие:",
+            reply_markup=reply_markup
+        )
+        return MAIN_MENU
+        
+    except json.JSONDecodeError:
+        await update.message.reply_text(
+            "❌ Ошибка: файл не является корректным JSON.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="backup_cancel")
+            ]])
+        )
+        return WAITING_FOR_BACKUP_FILE
+    except Exception as e:
+        logger.error(f"Restore error: {e}")
+        await update.message.reply_text(
+            f"❌ Ошибка восстановления: {e}",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="backup_cancel")
+            ]])
+        )
+        return WAITING_FOR_BACKUP_FILE
+
+async def backup_cancel(update: Update, context):
+    """Отмена загрузки бэкапа и возврат в меню бэкапов"""
+    query = update.callback_query
+    await query.answer()
+    await settings_backup(update, context)
+    return BACKUP_MENU
 # ============================================
 # ОБЩИЕ ФУНКЦИИ
 # ============================================
@@ -1201,12 +1396,12 @@ async def back_to_main(update: Update, context):
     query = update.callback_query
     await query.answer()
     
-    # Полностью очищаем контекст
     context.user_data.clear()
     
     keyboard = [
         [InlineKeyboardButton("👥 Управление продавцами", callback_data="settings_sellers")],
         [InlineKeyboardButton("🏷️ Товары и цены", callback_data="settings_products")],
+        [InlineKeyboardButton("🔐 Бэкапы", callback_data="settings_backup")],
         [InlineKeyboardButton("🔙 В админ-меню", callback_data="settings_back")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -1222,7 +1417,6 @@ async def exit_settings(update: Update, context):
     query = update.callback_query
     await query.answer()
     
-    # Полностью очищаем контекст
     context.user_data.clear()
     
     await query.edit_message_text(
@@ -1233,7 +1427,7 @@ async def exit_settings(update: Update, context):
     return ConversationHandler.END
 
 # ============================================
-# ОБРАБОТЧИК РАЗГОВОРА
+# ОБНОВЛЁННЫЙ ОБРАБОТЧИК РАЗГОВОРА
 # ============================================
 
 admin_settings_conv = ConversationHandler(
@@ -1242,12 +1436,13 @@ admin_settings_conv = ConversationHandler(
         MAIN_MENU: [
             CallbackQueryHandler(settings_sellers, pattern='^settings_sellers$'),
             CallbackQueryHandler(settings_products, pattern='^settings_products$'),
+            CallbackQueryHandler(settings_backup, pattern='^settings_backup$'),
             CallbackQueryHandler(seller_add_start, pattern='^seller_add$'),
             CallbackQueryHandler(seller_list, pattern='^seller_list$'),
             CallbackQueryHandler(back_to_main, pattern='^settings_back_to_main$'),
             CallbackQueryHandler(exit_settings, pattern='^settings_back$')
         ],
-        # Состояния для продавцов
+        # Состояния для продавцов (без изменений)
         ADD_SELLER_CODE: [
             CallbackQueryHandler(seller_add_start, pattern='^seller_add$'),
             CallbackQueryHandler(seller_cancel, pattern='^seller_cancel$'),
@@ -1281,7 +1476,7 @@ admin_settings_conv = ConversationHandler(
             CallbackQueryHandler(seller_confirm_delete, pattern='^seller_confirm_delete$'),
             CallbackQueryHandler(seller_list, pattern='^seller_list$')
         ],
-        # Состояния для товаров
+        # Состояния для товаров (без изменений)
         PRODUCTS_MENU: [
             CallbackQueryHandler(settings_products, pattern='^settings_products$'),
             CallbackQueryHandler(product_add_start, pattern='^product_add$'),
@@ -1315,6 +1510,17 @@ admin_settings_conv = ConversationHandler(
             CallbackQueryHandler(product_cancel, pattern='^product_cancel$'),
             CallbackQueryHandler(product_cancel, pattern='^product_cancel_edit$'),
             MessageHandler(filters.TEXT & ~filters.COMMAND, product_update_field)
+        ],
+        # Новые состояния для бэкапов
+        BACKUP_MENU: [
+            CallbackQueryHandler(backup_create, pattern='^backup_create$'),
+            CallbackQueryHandler(backup_upload_start, pattern='^backup_upload$'),
+            CallbackQueryHandler(back_to_main, pattern='^settings_back_to_main$'),
+            CallbackQueryHandler(backup_cancel, pattern='^backup_cancel$')
+        ],
+        WAITING_FOR_BACKUP_FILE: [
+            CallbackQueryHandler(backup_cancel, pattern='^backup_cancel$'),
+            MessageHandler(filters.Document.ALL, backup_file_received)
         ]
     },
     fallbacks=[CommandHandler('cancel', exit_settings)],
