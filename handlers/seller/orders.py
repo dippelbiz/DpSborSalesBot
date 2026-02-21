@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
@@ -13,6 +14,7 @@ from config import config
 from keyboards import get_main_menu, get_back_and_cancel_keyboard
 from backup_decorator import send_backup_to_admin
 import logging
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +201,7 @@ async def show_cart_summary(update: Update, context):
         )
 
 async def add_more(update: Update, context):
-    """Возврат к выбору товара для добавления (редактирует текущее сообщение)."""
+    """Возврат к выбору товара для добавления."""
     query = update.callback_query
     await query.answer()
 
@@ -249,7 +251,6 @@ async def confirm_order(update: Update, context):
     seller_id = context.user_data['seller_id']
     seller_code = context.user_data['seller_code']
 
-    from datetime import datetime
     date_str = datetime.now().strftime("%d%m")
 
     with db.get_connection() as conn:
@@ -267,11 +268,13 @@ async def confirm_order(update: Update, context):
         """, (order_number, seller_id, seller_code))
         order_id = cursor.lastrowid
 
+        items_summary = []
         for prod_id, item in cart.items():
             cursor.execute("""
                 INSERT INTO order_items (order_id, product_id, quantity_ordered, price_at_order)
                 VALUES (?, ?, ?, ?)
             """, (order_id, prod_id, item['qty'], item['price']))
+            items_summary.append(f"{item['name']}: {item['qty']} упак")
 
     await query.edit_message_text(
         f"✅ Заявка № {order_number} успешно создана!",
@@ -282,6 +285,22 @@ async def confirm_order(update: Update, context):
         text="Выберите следующее действие:",
         reply_markup=get_main_menu()
     )
+
+    # Уведомляем админов
+    total_sum = sum(item['qty'] * item['price'] for item in cart.values())
+    items_text = "\n".join(items_summary)
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_id,
+                text=f"🟡 **Новая заявка на поставку!**\n\n"
+                     f"Номер: {order_number}\n"
+                     f"Продавец: {seller_code}\n"
+                     f"{items_text}\n"
+                     f"Общая сумма: {total_sum} руб"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить админа {admin_id}: {e}")
 
     context.user_data.clear()
     return ConversationHandler.END
@@ -351,10 +370,8 @@ async def my_orders(update: Update, context):
 
     await update.message.reply_text(text, reply_markup=get_main_menu())
 
-# --- Обработчики для регистрации в main.py ---
 my_orders_handler = MessageHandler(filters.Regex('^📋 Мои заявки$'), my_orders)
 
-# ConversationHandler для создания заявок
 orders_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex('^📦 Заявка на поставку$'), orders_start)],
     states={
