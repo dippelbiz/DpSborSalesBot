@@ -34,7 +34,7 @@ from handlers.common import start, menu_handler, handle_message, activation_conv
 
 # Обработчики продавцов
 from handlers.seller.orders import orders_conv, my_orders_handler
-from handlers.seller.shipments import shipments_conv   # ← ВАЖНО: используем shipments_conv
+from handlers.seller.shipments import shipments_conv
 from handlers.seller.sales import sales_conv
 from handlers.seller.stock import stock_handler
 
@@ -127,6 +127,13 @@ async def emergency_restore(update: Update, context):
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка восстановления: {str(e)}")
 
+# === ОТЛАДОЧНЫЙ ОБРАБОТЧИК ВСЕХ КОЛБЭКОВ ===
+async def debug_callback(update: Update, context):
+    if update.callback_query:
+        logger.info(f"🔥 GLOBAL CALLBACK: {update.callback_query.data}")
+        await update.callback_query.answer()  # обязательно ответить, чтобы убрать "часики"
+    return
+
 # === ФУНКЦИЯ ДЛЯ ЗАПУСКА С ВЕБХУКАМИ ===
 async def run_webhook():
     logger.info("Запуск бота с вебхуками...")
@@ -139,6 +146,9 @@ async def run_webhook():
     
     application = Application.builder().token(TOKEN).updater(None).build()
     
+    # Добавляем отладочный обработчик с самым высоким приоритетом
+    application.add_handler(CallbackQueryHandler(debug_callback), group=-1)
+    
     # Команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("menu", menu_handler))
@@ -150,7 +160,7 @@ async def run_webhook():
     
     # ConversationHandler'ы
     application.add_handler(orders_conv)
-    application.add_handler(shipments_conv)          # ← вот здесь
+    application.add_handler(shipments_conv)
     application.add_handler(sales_conv)
     application.add_handler(admin_orders_conv)
     application.add_handler(admin_payments_conv)
@@ -169,6 +179,7 @@ async def run_webhook():
     async def telegram(request):
         try:
             body = await request.json()
+            logger.info(f"🔥 Webhook received: {body}")
             update = Update.de_json(body, application.bot)
             await application.update_queue.put(update)
             return Response()
@@ -206,6 +217,9 @@ def main():
     else:
         logger.info("Запуск бота локально (polling)...")
         application = Application.builder().token(config.BOT_TOKEN).build()
+        
+        # Добавляем отладочный обработчик для локального режима
+        application.add_handler(CallbackQueryHandler(debug_callback), group=-1)
         
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("menu", menu_handler))
