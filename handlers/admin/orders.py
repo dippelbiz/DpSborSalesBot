@@ -224,6 +224,65 @@ async def admin_order_ship(update: Update, context):
 
     return SELECTING_ORDER
 
+@send_backup_to_admin("отмена заявки")
+async def admin_order_cancel(update: Update, context):
+    """Отмена заявки администратором"""
+    query = update.callback_query
+    await query.answer()
+
+    order_id = int(query.data.replace('admin_order_cancel_', ''))
+
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        # Получаем информацию о заявке для уведомления
+        cursor.execute("""
+            SELECT o.order_number, o.seller_code, o.seller_id
+            FROM orders o
+            WHERE o.id = ?
+        """, (order_id,))
+        order_info = cursor.fetchone()
+
+        cursor.execute("""
+            UPDATE orders
+            SET status = 'cancelled'
+            WHERE id = ?
+        """, (order_id,))
+
+    await query.edit_message_text(
+        "❌ Заявка отменена.",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔙 К заявкам", callback_data="admin_orders_back_to_menu")
+        ]])
+    )
+
+    # Уведомляем продавца
+    if order_info:
+        seller_id = order_info['seller_id']
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id FROM sellers WHERE id = ?", (seller_id,))
+            res = cursor.fetchone()
+            if res:
+                seller_tg = res['telegram_id']
+                try:
+                    await context.bot.send_message(
+                        chat_id=seller_tg,
+                        text=f"❌ **Заявка отменена**\n\n"
+                             f"Номер: {order_info['order_number']}\n"
+                             f"Ваша заявка была отменена администратором."
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить продавца {seller_tg}: {e}")
+
+    return SELECTING_ORDER
+
+async def admin_orders_back_to_new(update: Update, context):
+    """Возврат к списку новых заявок"""
+    query = update.callback_query
+    await query.answer()
+    await admin_orders_new(update, context)
+    return SELECTING_ORDER
+
 async def admin_orders_back_to_menu(update: Update, context):
     """Возврат в главное меню поставок"""
     query = update.callback_query
@@ -281,6 +340,8 @@ admin_orders_conv = ConversationHandler(
             CallbackQueryHandler(admin_orders_exit, pattern='^admin_orders_exit$'),
             CallbackQueryHandler(admin_order_view, pattern='^admin_order_view_'),
             CallbackQueryHandler(admin_order_ship, pattern='^admin_order_ship_'),
+            CallbackQueryHandler(admin_order_cancel, pattern='^admin_order_cancel_'),  # добавлено
+            CallbackQueryHandler(admin_orders_back_to_new, pattern='^admin_orders_back_to_new$'),  # добавлено
         ]
     },
     fallbacks=[CommandHandler('cancel', admin_orders_exit)],
