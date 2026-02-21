@@ -7,6 +7,9 @@ from database import db
 from config import config
 from keyboards import get_admin_menu
 from backup_decorator import send_backup_to_admin
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Состояния разговора
 SELECTING_ORDER, CONFIRMING_SHIPMENT = range(2)
@@ -14,30 +17,23 @@ SELECTING_ORDER, CONFIRMING_SHIPMENT = range(2)
 async def admin_orders_start(update: Update, context):
     """Главное меню управления поставками"""
     user_id = update.effective_user.id
-    
+
     if user_id not in config.ADMIN_IDS:
         await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
-    
-    # Получаем статистику
+
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        
-        # Новые заявки
         cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'new'")
         new_count = cursor.fetchone()[0]
-        
-        # В пути
         cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'shipped'")
         shipped_count = cursor.fetchone()[0]
-        
-        # Завершенные сегодня
         cursor.execute("""
-            SELECT COUNT(*) FROM orders 
+            SELECT COUNT(*) FROM orders
             WHERE status = 'completed' AND date(completed_at) = date('now')
         """)
         completed_today = cursor.fetchone()[0]
-    
+
     keyboard = [
         [InlineKeyboardButton(f"🟡 Новые заявки ({new_count})", callback_data="admin_orders_new")],
         [InlineKeyboardButton(f"🔵 В пути ({shipped_count})", callback_data="admin_orders_shipped")],
@@ -45,7 +41,7 @@ async def admin_orders_start(update: Update, context):
         [InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     await update.message.reply_text(
         f"📦 Управление поставками\n\n"
         f"🟡 Новых: {new_count}\n"
@@ -54,14 +50,14 @@ async def admin_orders_start(update: Update, context):
         f"Выберите действие:",
         reply_markup=reply_markup
     )
-    
+
     return SELECTING_ORDER
 
 async def admin_orders_new(update: Update, context):
     """Просмотр новых заявок"""
     query = update.callback_query
     await query.answer()
-    
+
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -76,7 +72,7 @@ async def admin_orders_new(update: Update, context):
             ORDER BY o.created_at ASC
         """)
         orders = cursor.fetchall()
-    
+
     if not orders:
         await query.edit_message_text(
             "📭 Нет новых заявок",
@@ -85,47 +81,47 @@ async def admin_orders_new(update: Update, context):
             ]])
         )
         return SELECTING_ORDER
-    
+
     text = "🟡 Новые заявки:\n\n"
     keyboard = []
-    
+
     for order in orders:
         text += f"📋 {order['order_number']} ({order['seller_code']})\n"
         text += f"   {order['items']}\n"
         text += f"   Сумма: {order['total']} руб\n"
         text += f"   от {order['created_at'][:16]}\n\n"
         keyboard.append([InlineKeyboardButton(
-            f"✅ {order['order_number']}", 
+            f"✅ {order['order_number']}",
             callback_data=f"admin_order_view_{order['id']}"
         )])
-    
+
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back_to_menu")])
-    
+
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    
+
     return SELECTING_ORDER
 
 async def admin_order_view(update: Update, context):
     """Просмотр конкретной заявки"""
     query = update.callback_query
     await query.answer()
-    
+
     order_id = int(query.data.replace('admin_order_view_', ''))
     context.user_data['current_order_id'] = order_id
-    
+
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT o.*, s.full_name 
+            SELECT o.*, s.full_name, s.telegram_id
             FROM orders o
             JOIN sellers s ON o.seller_id = s.id
             WHERE o.id = ?
         """, (order_id,))
         order = cursor.fetchone()
-        
+
         cursor.execute("""
             SELECT p.product_name, oi.quantity_ordered, oi.price_at_order,
                    oi.quantity_ordered * oi.price_at_order as total
@@ -134,38 +130,38 @@ async def admin_order_view(update: Update, context):
             WHERE oi.order_id = ?
         """, (order_id,))
         items = cursor.fetchall()
-    
+
     status_emoji = {
         'new': '🟡',
         'shipped': '🔵',
         'completed': '🟢',
         'cancelled': '⚫'
     }.get(order['status'], '⚪')
-    
+
     text = f"{status_emoji} Заявка: {order['order_number']}\n"
     text += f"Продавец: {order['seller_code']} - {order['full_name']}\n"
     text += f"Дата: {order['created_at'][:16]}\n"
     text += f"Статус: {order['status']}\n\n"
     text += "Товары:\n"
-    
+
     for item in items:
         text += f"• {item['product_name']}: {item['quantity_ordered']} упак × {item['price_at_order']} = {item['total']} руб\n"
-    
+
     keyboard = []
-    
+
     if order['status'] == 'new':
         keyboard.append([InlineKeyboardButton("✅ Подтвердить отгрузку", callback_data=f"admin_order_ship_{order_id}")])
         keyboard.append([InlineKeyboardButton("❌ Отменить заявку", callback_data=f"admin_order_cancel_{order_id}")])
     elif order['status'] == 'shipped':
         keyboard.append([InlineKeyboardButton("📦 Отметить как получено", callback_data=f"admin_order_complete_{order_id}")])
-    
+
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back_to_new")])
-    
+
     await query.edit_message_text(
         text,
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    
+
     return SELECTING_ORDER
 
 @send_backup_to_admin("подтверждение отгрузки")
@@ -173,17 +169,29 @@ async def admin_order_ship(update: Update, context):
     """Подтверждение отгрузки заявки"""
     query = update.callback_query
     await query.answer()
-    
+
     order_id = int(query.data.replace('admin_order_ship_', ''))
-    
+
     with db.get_connection() as conn:
         cursor = conn.cursor()
+        # Получаем информацию о заявке для уведомления
         cursor.execute("""
-            UPDATE orders 
+            SELECT o.order_number, o.seller_code, o.seller_id,
+                   GROUP_CONCAT(p.product_name || ' ' || oi.quantity_ordered || ' упак') as items
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            JOIN products p ON oi.product_id = p.id
+            WHERE o.id = ?
+            GROUP BY o.id
+        """, (order_id,))
+        order_info = cursor.fetchone()
+
+        cursor.execute("""
+            UPDATE orders
             SET status = 'shipped', shipped_at = CURRENT_TIMESTAMP
             WHERE id = ?
         """, (order_id,))
-    
+
     await query.edit_message_text(
         "✅ Отгрузка подтверждена!\n\n"
         "Заявка переведена в статус 'В пути'.\n"
@@ -192,17 +200,35 @@ async def admin_order_ship(update: Update, context):
             InlineKeyboardButton("🔙 К заявкам", callback_data="admin_orders_back_to_menu")
         ]])
     )
-    
+
+    # Уведомляем продавца
+    if order_info:
+        seller_id = order_info['seller_id']
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT telegram_id FROM sellers WHERE id = ?", (seller_id,))
+            res = cursor.fetchone()
+            if res:
+                seller_tg = res['telegram_id']
+                try:
+                    await context.bot.send_message(
+                        chat_id=seller_tg,
+                        text=f"🚚 **Статус заявки изменён**\n\n"
+                             f"Номер: {order_info['order_number']}\n"
+                             f"Ваша заявка переведена в статус **«В пути»**.\n"
+                             f"{order_info['items']}\n\n"
+                             f"Когда получите товар, не забудьте подтвердить получение в разделе «📤 Отгруженные поставки»."
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить продавца {seller_tg}: {e}")
+
     return SELECTING_ORDER
 
 async def admin_orders_back_to_menu(update: Update, context):
     """Возврат в главное меню поставок"""
     query = update.callback_query
     await query.answer()
-    
-    # Перезапускаем админское меню
-    user_id = update.effective_user.id
-    
+
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'new'")
@@ -210,11 +236,11 @@ async def admin_orders_back_to_menu(update: Update, context):
         cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'shipped'")
         shipped_count = cursor.fetchone()[0]
         cursor.execute("""
-            SELECT COUNT(*) FROM orders 
+            SELECT COUNT(*) FROM orders
             WHERE status = 'completed' AND date(completed_at) = date('now')
         """)
         completed_today = cursor.fetchone()[0]
-    
+
     keyboard = [
         [InlineKeyboardButton(f"🟡 Новые заявки ({new_count})", callback_data="admin_orders_new")],
         [InlineKeyboardButton(f"🔵 В пути ({shipped_count})", callback_data="admin_orders_shipped")],
@@ -222,7 +248,7 @@ async def admin_orders_back_to_menu(update: Update, context):
         [InlineKeyboardButton("🔙 В админ-меню", callback_data="admin_orders_exit")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
+
     await query.edit_message_text(
         f"📦 Управление поставками\n\n"
         f"🟡 Новых: {new_count}\n"
@@ -231,22 +257,21 @@ async def admin_orders_back_to_menu(update: Update, context):
         f"Выберите действие:",
         reply_markup=reply_markup
     )
-    
+
     return SELECTING_ORDER
 
 async def admin_orders_exit(update: Update, context):
     """Выход в главное админское меню"""
     query = update.callback_query
     await query.answer()
-    
+
     await query.edit_message_text(
         "Выход в главное меню",
         reply_markup=get_admin_menu()
     )
-    
+
     return ConversationHandler.END
 
-# Обработчик разговора для управления поставками
 admin_orders_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex('^📦 Управление поставками$'), admin_orders_start)],
     states={
@@ -259,5 +284,5 @@ admin_orders_conv = ConversationHandler(
         ]
     },
     fallbacks=[CommandHandler('cancel', admin_orders_exit)],
-    allow_reentry=True  # ← ВАЖНО: добавляем эту строку
+    allow_reentry=True
 )
