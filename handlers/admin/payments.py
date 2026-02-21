@@ -127,7 +127,8 @@ async def payment_view(update: Update, context):
             SELECT pr.id, pr.request_number, pr.amount, pr.created_at,
                    s.seller_code, s.full_name, s.id as seller_id,
                    COALESCE(sd.total_debt, 0) as total_debt,
-                   COALESCE(sp.pending_amount, 0) as pending_amount
+                   COALESCE(sp.pending_amount, 0) as pending_amount,
+                   s.telegram_id
             FROM payment_requests pr
             JOIN sellers s ON pr.seller_id = s.id
             LEFT JOIN seller_debt sd ON s.id = sd.seller_id
@@ -147,6 +148,7 @@ async def payment_view(update: Update, context):
     
     context.user_data['seller_id'] = payment['seller_id']
     context.user_data['original_amount'] = payment['amount']
+    context.user_data['seller_telegram_id'] = payment['telegram_id']
     
     text = f"📋 Запрос на выплату\n\n"
     text += f"Номер: {payment['request_number']}\n"
@@ -179,7 +181,13 @@ async def payment_edit_start(update: Update, context):
     
     payment_id = context.user_data.get('current_payment_id')
     if not payment_id:
-        await query.edit_message_text("❌ Ошибка: запрос не найден")
+        logger.error("payment_edit_start: no current_payment_id in context")
+        await query.edit_message_text(
+            "❌ Ошибка: данные запроса утеряны.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 Назад", callback_data="payments_pending")
+            ]])
+        )
         return CONFIRM_PAYMENT
     
     # Получаем информацию о запросе
@@ -272,14 +280,37 @@ async def payment_edit_confirm(update: Update, context):
     new_amount = context.user_data.get('new_amount')
     
     if not all([payment_id, seller_id, new_amount]):
-        await query.edit_message_text("❌ Ошибка: данные не найдены")
+        missing = []
+        if not payment_id: missing.append("payment_id")
+        if not seller_id: missing.append("seller_id")
+        if not new_amount: missing.append("new_amount")
+        logger.error(f"payment_edit_confirm: missing keys {missing}")
+        await query.edit_message_text(
+            "❌ Ошибка: данные для обработки утеряны. Пожалуйста, вернитесь в список запросов.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 К запросам", callback_data="payments_pending")
+            ]])
+        )
         return MAIN_MENU
     
     try:
         with db.get_connection() as conn:
             cursor = conn.cursor()
             
-            # Обновляем сумму в запросе
+            # Получаем информацию о запросе и продавце
+            cursor.execute("""
+                SELECT pr.request_number, s.telegram_id, s.seller_code, s.full_name
+                FROM payment_requests pr
+                JOIN sellers s ON pr.seller_id = s.id
+                WHERE pr.id = ?
+            """, (payment_id,))
+            data = cursor.fetchone()
+            
+            if not data:
+                await query.edit_message_text("❌ Запрос не найден")
+                return MAIN_MENU
+            
+            # Обновляем сумму в запросе и статус
             cursor.execute("""
                 UPDATE payment_requests 
                 SET amount = ?, status = 'approved', approved_at = CURRENT_TIMESTAMP
@@ -301,36 +332,19 @@ async def payment_edit_confirm(update: Update, context):
                     updated_at = CURRENT_TIMESTAMP
                 WHERE seller_id = ?
             """, (new_amount, seller_id))
-            
-            # Получаем информацию для уведомления
-            cursor.execute("""
-                SELECT request_number, s.seller_code, s.full_name
-                FROM payment_requests pr
-                JOIN sellers s ON pr.seller_id = s.id
-                WHERE pr.id = ?
-            """, (payment_id,))
-            data = cursor.fetchone()
         
         # Отправляем уведомление продавцу
-        seller_tg_id = None
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT telegram_id FROM sellers WHERE id = ?", (seller_id,))
-            res = cursor.fetchone()
-            if res:
-                seller_tg_id = res['telegram_id']
-        
-        if seller_tg_id:
+        if data['telegram_id']:
             try:
                 await context.bot.send_message(
-                    chat_id=seller_tg_id,
+                    chat_id=data['telegram_id'],
                     text=f"✅ Выплата подтверждена администратором!\n\n"
                          f"Номер запроса: {data['request_number']}\n"
                          f"Сумма: {new_amount} руб\n"
                          f"Средства переведены."
                 )
             except Exception as e:
-                logger.error(f"Failed to notify seller {seller_tg_id}: {e}")
+                logger.error(f"Failed to notify seller {data['telegram_id']}: {e}")
         
         await query.edit_message_text(
             f"✅ Выплата подтверждена!\n\n"
@@ -384,16 +398,20 @@ async def payment_confirm(update: Update, context):
     payment_id = context.user_data.get('current_payment_id')
     
     if not payment_id:
-        await query.edit_message_text("❌ Ошибка: запрос не найден")
-        return ConversationHandler.END
+        logger.error("payment_confirm: no current_payment_id in context")
+        await query.edit_message_text(
+            "❌ Ошибка: данные о запросе утеряны. Пожалуйста, вернитесь в список запросов.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔙 К запросам", callback_data="payments_pending")
+            ]])
+        )
+        return MAIN_MENU
     
     try:
         with db.get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Получаем информацию о платеже
             cursor.execute("""
-                SELECT pr.*, s.id as seller_id
+                SELECT pr.*, s.id as seller_id, s.telegram_id, s.seller_code
                 FROM payment_requests pr
                 JOIN sellers s ON pr.seller_id = s.id
                 WHERE pr.id = ?
@@ -402,7 +420,7 @@ async def payment_confirm(update: Update, context):
             
             if not payment:
                 await query.edit_message_text("❌ Запрос не найден")
-                return CONFIRM_PAYMENT
+                return MAIN_MENU
             
             # Обновляем статус запроса
             cursor.execute("""
@@ -427,7 +445,7 @@ async def payment_confirm(update: Update, context):
                 WHERE seller_id = ?
             """, (payment['amount'], payment['seller_id']))
             
-            # Получаем обновленные данные
+            # Получаем обновлённые данные
             cursor.execute("""
                 SELECT total_debt, pending_amount 
                 FROM seller_debt sd
@@ -437,25 +455,17 @@ async def payment_confirm(update: Update, context):
             new_state = cursor.fetchone()
         
         # Отправляем уведомление продавцу
-        seller_tg_id = None
-        with db.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT telegram_id FROM sellers WHERE id = ?", (payment['seller_id'],))
-            res = cursor.fetchone()
-            if res:
-                seller_tg_id = res['telegram_id']
-        
-        if seller_tg_id:
+        if payment.get('telegram_id'):
             try:
                 await context.bot.send_message(
-                    chat_id=seller_tg_id,
+                    chat_id=payment['telegram_id'],
                     text=f"✅ Выплата подтверждена администратором!\n\n"
                          f"Номер запроса: {payment['request_number']}\n"
                          f"Сумма: {payment['amount']} руб\n"
                          f"Средства переведены."
                 )
             except Exception as e:
-                logger.error(f"Failed to notify seller {seller_tg_id}: {e}")
+                logger.error(f"Failed to notify seller {payment['telegram_id']}: {e}")
         
         await query.edit_message_text(
             f"✅ Выплата подтверждена!\n\n"
