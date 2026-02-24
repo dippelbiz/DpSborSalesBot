@@ -152,6 +152,15 @@ class Database:
                 )
             ''')
             
+            # Таблица центрального склада (хаб)
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS central_stock (
+                    product_id INTEGER PRIMARY KEY,
+                    quantity INTEGER DEFAULT 0,
+                    FOREIGN KEY (product_id) REFERENCES products(id)
+                )
+            ''')
+            
             # Таблица для логов (для аудита)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS logs (
@@ -181,6 +190,15 @@ class Database:
                         "INSERT INTO products (product_name, price) VALUES (?, ?)",
                         (name, price)
                     )
+                    product_id = cursor.lastrowid
+                    # Добавляем запись в central_stock с нулевым остатком
+                    cursor.execute("INSERT OR IGNORE INTO central_stock (product_id, quantity) VALUES (?, 0)", (product_id,))
+            
+            # Если есть товары, но нет записей в central_stock – добавить
+            cursor.execute("SELECT id FROM products")
+            products = cursor.fetchall()
+            for p in products:
+                cursor.execute("INSERT OR IGNORE INTO central_stock (product_id, quantity) VALUES (?, 0)", (p['id'],))
     
     def log_action(self, user_id, user_role, action, details=None):
         """Запись действия в лог"""
