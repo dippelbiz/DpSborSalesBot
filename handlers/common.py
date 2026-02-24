@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, Mess
 
 from config import config
 from database import db
-from keyboards import get_main_menu, get_admin_menu
+from keyboards import get_main_menu, get_admin_menu, get_seller_menu, get_back_keyboard
 
 # Состояние для активации
 ENTERING_CODE = 1
@@ -27,8 +27,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in config.ADMIN_IDS:
         # Для админа специальное меню
         await update.message.reply_text(
-            f"🔐 Добро пожаловать, администратор {user.full_name}!\n\n"
-            f"Выберите раздел в меню:",
+            f"🔐 Добро пожаловать, администратор {user.full_name}!",
             reply_markup=get_admin_menu()
         )
         
@@ -47,12 +46,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seller = cursor.fetchone()
     
     if seller:
-        # Продавец уже активирован – показываем главное меню продавца
+        # Продавец уже активирован – показываем персонализированное меню
         await update.message.reply_text(
-            f"👋 С возвращением, {seller['full_name']}!\n\n"
-            f"Ваш код: {seller['seller_code']}\n"
-            f"Выберите действие:",
-            reply_markup=get_main_menu()
+            f"👋 С возвращением, {seller['full_name']}!",
+            reply_markup=get_seller_menu(seller['seller_code'])
         )
         
         db.log_action(
@@ -104,7 +101,7 @@ async def activate_seller(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 f"👋 Вы уже активированы как {existing['full_name']}.\n"
                 f"Ваш код: {existing['seller_code']}",
-                reply_markup=get_main_menu()
+                reply_markup=get_seller_menu(existing['seller_code'])
             )
             return ConversationHandler.END
     
@@ -151,7 +148,7 @@ async def activate_seller(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Добро пожаловать, {seller['full_name']}!\n"
         f"Ваш код: {seller['seller_code']}\n\n"
         f"Теперь вы можете пользоваться ботом.",
-        reply_markup=get_main_menu()
+        reply_markup=get_seller_menu(seller['seller_code'])
     )
     
     db.log_action(
@@ -201,6 +198,10 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif text == '⚙️ Настройки':
             from handlers.admin.settings import admin_settings_start
             return await admin_settings_start(update, context)
+        
+        elif text == '🆘 Пополнение склада':
+            from handlers.admin.restock import restock_start
+            return await restock_start(update, context)
     
     # Проверяем, активирован ли продавец
     with db.get_connection() as conn:
@@ -221,6 +222,8 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
     
     # Обычные кнопки для активированных продавцов
+    seller_code = seller['seller_code'] if seller else None
+    
     if text == '📦 Заявка на поставку':
         from handlers.seller.orders import orders_start
         return await orders_start(update, context)
@@ -241,6 +244,10 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from handlers.seller.orders import my_orders
         return await my_orders(update, context)
     
+    elif text == '📦 Заявка на пополнение склада':
+        from handlers.seller.restock import restock_start
+        return await restock_start(update, context)
+    
     elif text == '❌ Отмена':
         if is_admin:
             await update.message.reply_text(
@@ -250,7 +257,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(
                 "Действие отменено.",
-                reply_markup=get_main_menu()
+                reply_markup=get_seller_menu(seller_code)
             )
         return ConversationHandler.END
     
@@ -263,7 +270,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif seller:
             await update.message.reply_text(
                 "Пожалуйста, используйте кнопки меню.",
-                reply_markup=get_main_menu()
+                reply_markup=get_seller_menu(seller_code)
             )
         else:
             await update.message.reply_text(
@@ -291,7 +298,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif seller:
         await update.message.reply_text(
             "Я не понимаю эту команду. Пожалуйста, используйте кнопки меню.",
-            reply_markup=get_main_menu()
+            reply_markup=get_seller_menu(seller['seller_code'])
         )
     else:
         await update.message.reply_text(
