@@ -17,10 +17,9 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Состояния разговора
 MAIN_MENU, ENTERING_QUANTITY = range(2)
 
-async def restock_start(update: Update, context):
+async def restock_admin_start(update: Update, context):
     """Главное меню раздела – показывает сводку по товарам."""
     user_id = update.effective_user.id
     if user_id not in config.ADMIN_IDS:
@@ -77,7 +76,6 @@ async def select_item(update: Update, context):
     product_id = int(query.data.replace('restock_item_', ''))
     context.user_data['current_product_id'] = product_id
 
-    # Получаем информацию о товаре и общее запрошенное количество
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -115,7 +113,7 @@ async def quantity_entered(update: Update, context):
 
     text = update.message.text
     if text == '🔙 Назад':
-        await restock_start(update, context)
+        await restock_admin_start(update, context)
         return MAIN_MENU
 
     try:
@@ -166,16 +164,10 @@ async def quantity_entered(update: Update, context):
             cursor.execute("UPDATE restock_items SET quantity_received = ? WHERE id = ?", (take, item['id']))
             remaining -= take
 
-        # Если остаток не ноль – значит, мы распределили всё закупленное количество
-        # Теперь добавляем товар на склад Р
-        price = None
+        # Добавляем товар на склад Р
         cursor.execute("SELECT price FROM products WHERE id = ?", (product_id,))
         price_row = cursor.fetchone()
-        if price_row:
-            price = price_row['price']
-        else:
-            await update.message.reply_text("❌ Цена товара не найдена.")
-            return MAIN_MENU
+        price = price_row['price'] if price_row else 0
 
         cursor.execute("SELECT quantity FROM seller_products WHERE seller_id = ? AND product_id = ?", (central_id, product_id))
         existing = cursor.fetchone()
@@ -192,7 +184,7 @@ async def quantity_entered(update: Update, context):
         else:
             cursor.execute("INSERT INTO seller_debt (seller_id, total_debt) VALUES (?, ?)", (central_id, price * qty))
 
-        # Закрываем все заявки, для которых все позиции получены
+        # Закрываем заявки, которые полностью выполнены
         cursor.execute("""
             SELECT request_id
             FROM restock_items
@@ -204,7 +196,7 @@ async def quantity_entered(update: Update, context):
         for req in completed_requests:
             cursor.execute("UPDATE restock_requests SET status = 'completed', completed_at = CURRENT_TIMESTAMP WHERE id = ?", (req['request_id'],))
 
-    # Уведомляем всех продавцов о пополнении склада
+    # Уведомляем всех продавцов о пополнении
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT telegram_id FROM sellers WHERE telegram_id IS NOT NULL")
@@ -232,21 +224,19 @@ async def quantity_entered(update: Update, context):
     return MAIN_MENU
 
 async def back_to_list(update: Update, context):
-    """Вернуться к списку товаров."""
     query = update.callback_query
     await query.answer()
-    await restock_start(update, context)
+    await restock_admin_start(update, context)
     return MAIN_MENU
 
 async def back_to_admin(update: Update, context):
-    """Выход в главное админское меню."""
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Выход в главное меню", reply_markup=get_admin_menu())
     return ConversationHandler.END
 
 restock_admin_conv = ConversationHandler(
-    entry_points=[MessageHandler(filters.Regex('^🆘 Пополнение склада$'), restock_start)],
+    entry_points=[MessageHandler(filters.Regex('^🆘 Пополнение склада$'), restock_admin_start)],
     states={
         MAIN_MENU: [
             CallbackQueryHandler(select_item, pattern='^restock_item_'),
