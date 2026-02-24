@@ -3,7 +3,7 @@
 
 """
 Обработчик для раздела "Пополнение склада" (админ).
-Показывает все товары с остатками и заявками, позволяет пополнить любой товар,
+Показывает срочные заявки и все товары, позволяет пополнить любой товар,
 ведёт архив пополнений.
 """
 
@@ -20,13 +20,12 @@ logger = logging.getLogger(__name__)
 MAIN_MENU, ENTERING_QUANTITY, CONFIRMING = range(3)
 
 async def restock_admin_start(update: Update, context):
-    """Главное меню – показывает все товары с остатками и заявками."""
+    """Главное меню – показывает срочные заявки и список всех товаров с кнопками."""
     user_id = update.effective_user.id
     if user_id not in config.ADMIN_IDS:
         await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
 
-    # Получаем ID продавца Р
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM sellers WHERE seller_code = 'Р'")
@@ -36,9 +35,7 @@ async def restock_admin_start(update: Update, context):
             return ConversationHandler.END
         central_id = central['id']
 
-    # Получаем все товары с остатками на складе Р и общим запрошенным количеством в pending-заявках
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
+        # Получаем все товары с остатками на складе Р и количеством в pending-заявках
         cursor.execute("""
             SELECT 
                 p.id,
@@ -62,26 +59,18 @@ async def restock_admin_start(update: Update, context):
         await update.message.reply_text("📭 Нет товаров.")
         return MAIN_MENU
 
-    text = "🆘 **Пополнение склада Р**\n\n"
-    text += "Выберите товар для пополнения:\n\n"
-    keyboard = []
+    # Блок срочных заявок
+    urgent_lines = [f"{p['product_name']} – {p['pending_requests']} упак" for p in products if p['pending_requests'] > 0]
+    urgent_text = "**Срочные заявки:**\n" + "\n".join(urgent_lines) if urgent_lines else "✅ Срочные заявки отсутствуют."
 
-    for prod in products:
-        prod_id = prod['id']
-        name = prod['product_name']
-        price = prod['price']
-        stock = prod['current_stock']
-        pending = prod['pending_requests']
+    # Блок всех товаров (название, цена, остаток)
+    product_lines = [f"**{p['product_name']}** – {p['price']} руб/упак, остаток: {p['current_stock']} упак" for p in products]
+    products_text = "\n".join(product_lines)
 
-        text += f"**{name}** (цена {price} руб)\n"
-        text += f"   Текущий остаток: {stock} упак\n"
-        text += f"   Запрошено в заявках: {pending} упак\n\n"
+    text = f"🆘 **Пополнение склада Р**\n\n{urgent_text}\n\n**Все товары:**\n{products_text}"
 
-        keyboard.append([InlineKeyboardButton(
-            f"✏️ {name}",
-            callback_data=f"restock_item_{prod_id}"
-        )])
-
+    # Клавиатура – кнопки для каждого товара
+    keyboard = [[InlineKeyboardButton(f"✏️ {p['product_name']}", callback_data=f"restock_item_{p['id']}")] for p in products]
     keyboard.append([InlineKeyboardButton("📜 Архив пополнений", callback_data="restock_history")])
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="restock_back")])
     reply_markup = InlineKeyboardMarkup(keyboard)
@@ -118,7 +107,7 @@ async def select_item(update: Update, context):
     # Убираем инлайн-клавиатуру из текущего сообщения
     await query.edit_message_text(query.message.text, reply_markup=None)
 
-    # Запрашиваем количество
+    # Отправляем новое сообщение с запросом количества
     await context.bot.send_message(
         chat_id=update.effective_user.id,
         text=f"Товар: **{prod['product_name']}**\n\n"
