@@ -161,8 +161,6 @@ class Database:
                 )
             ''')
             
-            # === НОВЫЕ ТАБЛИЦЫ ДЛЯ ЗАЯВОК НА ПОПОЛНЕНИЕ СКЛАДА ===
-            
             # Таблица заявок на пополнение центрального склада
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS restock_requests (
@@ -186,6 +184,17 @@ class Database:
                     quantity_requested INTEGER NOT NULL,
                     quantity_received INTEGER,
                     FOREIGN KEY (request_id) REFERENCES restock_requests(id),
+                    FOREIGN KEY (product_id) REFERENCES products(id)
+                )
+            ''')
+            
+            # Таблица истории пополнений склада Р
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS restock_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (product_id) REFERENCES products(id)
                 )
             ''')
