@@ -40,7 +40,6 @@ async def restock_admin_start(update: Update, context):
             SELECT 
                 p.id,
                 p.product_name,
-                p.price,
                 COALESCE(sp.quantity, 0) as current_stock,
                 COALESCE((
                     SELECT SUM(ri.quantity_requested)
@@ -63,8 +62,8 @@ async def restock_admin_start(update: Update, context):
     urgent_lines = [f"{p['product_name']} – {p['pending_requests']} упак" for p in products if p['pending_requests'] > 0]
     urgent_text = "**Срочные заявки:**\n" + "\n".join(urgent_lines) if urgent_lines else "✅ Срочные заявки отсутствуют."
 
-    # Блок всех товаров (название, цена, остаток)
-    product_lines = [f"**{p['product_name']}** – {p['price']} руб/упак, остаток: {p['current_stock']} упак" for p in products]
+    # Блок всех товаров (только название и остаток, без цены)
+    product_lines = [f"**{p['product_name']}** – остаток: {p['current_stock']} упак" for p in products]
     products_text = "\n".join(product_lines)
 
     text = f"🆘 **Пополнение склада Р**\n\n{urgent_text}\n\n**Все товары:**\n{products_text}"
@@ -96,13 +95,14 @@ async def select_item(update: Update, context):
 
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT product_name, price FROM products WHERE id = ?", (product_id,))
+        cursor.execute("SELECT product_name FROM products WHERE id = ?", (product_id,))
         prod = cursor.fetchone()
         if not prod:
             await query.edit_message_text("❌ Товар не найден.")
             return MAIN_MENU
         context.user_data['product_name'] = prod['product_name']
-        context.user_data['product_price'] = prod['price']
+        # Цена нам не нужна для отображения, но может понадобиться для расчёта долга. 
+        # Получим её отдельно позже, если нужно.
 
     # Убираем инлайн-клавиатуру из текущего сообщения
     await query.edit_message_text(query.message.text, reply_markup=None)
@@ -141,6 +141,13 @@ async def quantity_entered(update: Update, context):
 
     context.user_data['quantity'] = qty
 
+    # Получаем цену товара для расчёта долга (понадобится при подтверждении)
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT price FROM products WHERE id = ?", (context.user_data['current_product_id'],))
+        price_row = cursor.fetchone()
+        context.user_data['product_price'] = price_row['price'] if price_row else 0
+
     keyboard = [
         [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm_restock")],
         [InlineKeyboardButton("✏️ Изменить", callback_data="change_qty")],
@@ -166,7 +173,7 @@ async def confirm_restock(update: Update, context):
 
     product_id = context.user_data['current_product_id']
     product_name = context.user_data['product_name']
-    price = context.user_data['product_price']
+    price = context.user_data.get('product_price', 0)
     qty = context.user_data['quantity']
 
     with db.get_connection() as conn:
