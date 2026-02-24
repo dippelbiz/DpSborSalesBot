@@ -73,6 +73,12 @@ async def select_item(update: Update, context):
     """Админ выбрал товар – запрашиваем фактически закупленное количество."""
     query = update.callback_query
     await query.answer()
+    logger.info(f"select_item called with data: {query.data}")  # отладка
+
+    if not query.data.startswith('restock_item_'):
+        # Если какой-то другой callback, игнорируем
+        return MAIN_MENU
+
     product_id = int(query.data.replace('restock_item_', ''))
     context.user_data['current_product_id'] = product_id
 
@@ -113,6 +119,7 @@ async def quantity_entered(update: Update, context):
 
     text = update.message.text
     if text == '🔙 Назад':
+        # Возвращаемся в главное меню раздела
         await restock_admin_start(update, context)
         return MAIN_MENU
 
@@ -224,12 +231,14 @@ async def quantity_entered(update: Update, context):
     return MAIN_MENU
 
 async def back_to_list(update: Update, context):
+    """Вернуться к списку товаров."""
     query = update.callback_query
     await query.answer()
     await restock_admin_start(update, context)
     return MAIN_MENU
 
 async def back_to_admin(update: Update, context):
+    """Выход в главное админское меню."""
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Выход в главное меню", reply_markup=get_admin_menu())
