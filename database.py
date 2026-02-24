@@ -12,15 +12,12 @@ from contextlib import contextmanager
 from config import config
 
 class Database:
-    """Класс для работы с БД"""
-    
     def __init__(self, db_path):
         self.db_path = db_path
         self.init_db()
     
     @contextmanager
     def get_connection(self):
-        """Получение соединения с БД (контекстный менеджер)"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -74,7 +71,7 @@ class Database:
                 )
             ''')
             
-            # Таблица долга продавца (общий долг за товар)
+            # Таблица долга продавца
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS seller_debt (
                     seller_id INTEGER PRIMARY KEY,
@@ -84,7 +81,7 @@ class Database:
                 )
             ''')
             
-            # Таблица суммы к переводу (от продаж)
+            # Таблица суммы к переводу
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS seller_pending (
                     seller_id INTEGER PRIMARY KEY,
@@ -109,7 +106,7 @@ class Database:
                 )
             ''')
             
-            # Таблица товаров в заявке
+            # Таблица товаров в заявке на поставку
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS order_items (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -152,15 +149,6 @@ class Database:
                 )
             ''')
             
-            # Таблица центрального склада (хаб)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS central_stock (
-                    product_id INTEGER PRIMARY KEY,
-                    quantity INTEGER DEFAULT 0,
-                    FOREIGN KEY (product_id) REFERENCES products(id)
-                )
-            ''')
-            
             # Таблица для логов (для аудита)
             cursor.execute('''
                 CREATE TABLE IF NOT EXISTS logs (
@@ -170,6 +158,35 @@ class Database:
                     action TEXT,
                     details TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # === НОВЫЕ ТАБЛИЦЫ ДЛЯ ЗАЯВОК НА ПОПОЛНЕНИЕ СКЛАДА ===
+            
+            # Таблица заявок на пополнение центрального склада
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS restock_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_number TEXT UNIQUE NOT NULL,
+                    seller_id INTEGER NOT NULL,
+                    seller_code TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',  -- pending, completed, cancelled
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    completed_at DATETIME,
+                    FOREIGN KEY (seller_id) REFERENCES sellers(id)
+                )
+            ''')
+            
+            # Таблица товаров в заявке на пополнение
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS restock_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id INTEGER NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    quantity_requested INTEGER NOT NULL,
+                    quantity_received INTEGER,
+                    FOREIGN KEY (request_id) REFERENCES restock_requests(id),
+                    FOREIGN KEY (product_id) REFERENCES products(id)
                 )
             ''')
             
@@ -190,15 +207,6 @@ class Database:
                         "INSERT INTO products (product_name, price) VALUES (?, ?)",
                         (name, price)
                     )
-                    product_id = cursor.lastrowid
-                    # Добавляем запись в central_stock с нулевым остатком
-                    cursor.execute("INSERT OR IGNORE INTO central_stock (product_id, quantity) VALUES (?, 0)", (product_id,))
-            
-            # Если есть товары, но нет записей в central_stock – добавить
-            cursor.execute("SELECT id FROM products")
-            products = cursor.fetchall()
-            for p in products:
-                cursor.execute("INSERT OR IGNORE INTO central_stock (product_id, quantity) VALUES (?, 0)", (p['id'],))
     
     def log_action(self, user_id, user_role, action, details=None):
         """Запись действия в лог"""
