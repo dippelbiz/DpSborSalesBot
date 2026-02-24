@@ -11,14 +11,13 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from database import db
 from config import config
-from keyboards import get_seller_menu, get_back_keyboard
+from keyboards import get_main_menu, get_back_keyboard, get_confirm_keyboard, get_seller_menu
 from backup_decorator import send_backup_to_admin
 import logging
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-# Состояния разговора
 SELECTING_PRODUCT, ENTERING_QUANTITY, CONFIRMING_CART = range(3)
 
 async def orders_start(update: Update, context):
@@ -34,7 +33,7 @@ async def orders_start(update: Update, context):
     if not seller:
         await update.message.reply_text(
             "❌ Вы не активированы как продавец. Нажмите /start для активации.",
-            reply_markup=get_seller_menu(None)  # fallback
+            reply_markup=get_main_menu()
         )
         return ConversationHandler.END
 
@@ -56,7 +55,6 @@ async def orders_start(update: Update, context):
     return SELECTING_PRODUCT
 
 async def show_product_selection(update: Update, context):
-    """Отправляет сообщение с инлайн-кнопками товаров и их остатками на складе Р."""
     central_id = context.user_data['central_id']
     with db.get_connection() as conn:
         cursor = conn.cursor()
@@ -72,7 +70,7 @@ async def show_product_selection(update: Update, context):
     if not products:
         await update.message.reply_text(
             "❌ В данный момент нет доступных товаров.",
-            reply_markup=get_seller_menu(context.user_data['seller_code'])
+            reply_markup=get_main_menu()
         )
         return ConversationHandler.END
 
@@ -111,7 +109,6 @@ async def show_product_selection(update: Update, context):
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def product_selected(update: Update, context):
-    """Обработка выбора товара – запрашиваем количество."""
     query = update.callback_query
     await query.answer()
     data = query.data
@@ -156,7 +153,6 @@ async def product_selected(update: Update, context):
     return ENTERING_QUANTITY
 
 async def quantity_entered(update: Update, context):
-    """Обработка ввода количества – добавляем в корзину."""
     text = update.message.text
 
     if text == '🔙 Назад':
@@ -201,7 +197,6 @@ async def quantity_entered(update: Update, context):
     return SELECTING_PRODUCT
 
 async def show_cart_summary(update: Update, context):
-    """Отображает текущее содержимое корзины и кнопки действий."""
     cart = context.user_data.get('cart', {})
     if not cart:
         await show_product_selection(update, context)
@@ -227,17 +222,12 @@ async def show_cart_summary(update: Update, context):
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if update.callback_query:
-        await update.callback_query.edit_message_text(
-            text, reply_markup=reply_markup, parse_mode='Markdown'
-        )
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
     else:
-        await update.message.reply_text(
-            text, reply_markup=reply_markup, parse_mode='Markdown'
-        )
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 @send_backup_to_admin("создание заявки на поставку")
 async def confirm_order(update: Update, context):
-    """Подтверждение и сохранение заявки в БД."""
     query = update.callback_query
     await query.answer()
 
@@ -304,42 +294,39 @@ async def confirm_order(update: Update, context):
     return ConversationHandler.END
 
 async def add_more(update: Update, context):
-    """Возврат к выбору товара для добавления."""
     query = update.callback_query
     await query.answer()
     await show_product_selection(update, context)
     return SELECTING_PRODUCT
 
 async def cancel_all(update: Update, context):
-    """Полная отмена создания заявки."""
     query = update.callback_query
     await query.answer()
+    seller_code = context.user_data.get('seller_code')
     context.user_data.clear()
     await query.edit_message_text("❌ Создание заявки отменено.", reply_markup=None)
     await context.bot.send_message(
         chat_id=update.effective_user.id,
         text="Выберите действие:",
-        reply_markup=get_seller_menu(context.user_data.get('seller_code'))
+        reply_markup=get_seller_menu(seller_code) if seller_code else get_main_menu()
     )
     return ConversationHandler.END
 
 async def my_orders(update: Update, context):
-    """Просмотр своих заявок."""
     user_id = update.effective_user.id
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, seller_code FROM sellers WHERE telegram_id = ?", (user_id,))
+        cursor.execute("SELECT id FROM sellers WHERE telegram_id = ?", (user_id,))
         result = cursor.fetchone()
 
     if not result:
         await update.message.reply_text(
             "❌ Вы не активированы как продавец.",
-            reply_markup=get_seller_menu(None)
+            reply_markup=get_main_menu()
         )
         return
 
-    seller_id = result['id']
-    seller_code = result['seller_code']
+    seller_id = result[0]
 
     with db.get_connection() as conn:
         cursor = conn.cursor()
@@ -359,7 +346,7 @@ async def my_orders(update: Update, context):
     if not orders:
         await update.message.reply_text(
             "У вас пока нет заявок.",
-            reply_markup=get_seller_menu(seller_code)
+            reply_markup=get_main_menu()
         )
         return
 
@@ -374,7 +361,7 @@ async def my_orders(update: Update, context):
         text += f"{status_emoji} {order['order_number']} от {order['created_at'][:10]}\n"
         text += f"   {order['items']}\n\n"
 
-    await update.message.reply_text(text, reply_markup=get_seller_menu(seller_code))
+    await update.message.reply_text(text, reply_markup=get_main_menu())
 
 my_orders_handler = MessageHandler(filters.Regex('^📋 Мои заявки$'), my_orders)
 
