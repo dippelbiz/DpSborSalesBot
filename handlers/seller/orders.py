@@ -1,17 +1,17 @@
-
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
 Обработчики для заявок на поставку (продавец)
 Мультитоварная заявка с накоплением товаров в корзине.
+При создании проверяется доступное количество на складе Р.
 """
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from database import db
 from config import config
-from keyboards import get_main_menu, get_back_and_cancel_keyboard
+from keyboards import get_main_menu, get_back_keyboard, get_confirm_keyboard
 from backup_decorator import send_backup_to_admin
 import logging
 from datetime import datetime
@@ -42,14 +42,31 @@ async def orders_start(update: Update, context):
     context.user_data['seller_code'] = seller['seller_code']
     context.user_data['cart'] = {}
 
+    # Получаем ID продавца Р (центральный склад)
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM sellers WHERE seller_code = 'Р'")
+        central = cursor.fetchone()
+        if not central:
+            await update.message.reply_text("❌ Ошибка: центральный склад не найден.")
+            return ConversationHandler.END
+        context.user_data['central_id'] = central['id']
+
     await show_product_selection(update, context)
     return SELECTING_PRODUCT
 
 async def show_product_selection(update: Update, context):
-    """Отправляет сообщение с инлайн-кнопками товаров."""
+    """Отправляет сообщение с инлайн-кнопками товаров и их остатками на складе Р."""
+    central_id = context.user_data['central_id']
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, product_name, price FROM products WHERE is_active = 1 ORDER BY product_name")
+        cursor.execute("""
+            SELECT p.id, p.product_name, p.price, COALESCE(sp.quantity, 0) as central_quantity
+            FROM products p
+            LEFT JOIN seller_products sp ON sp.product_id = p.id AND sp.seller_id = ?
+            WHERE p.is_active = 1
+            ORDER BY p.product_name
+        """, (central_id,))
         products = cursor.fetchall()
 
     if not products:
@@ -59,81 +76,97 @@ async def show_product_selection(update: Update, context):
         )
         return ConversationHandler.END
 
-    keyboard = []
-    row = []
-    for i, prod in enumerate(products):
-        button = InlineKeyboardButton(
-            f"{prod['product_name']} ({prod['price']} руб)",
-            callback_data=f"product_{prod['id']}"
-        )
-        row.append(button)
-        if (i + 1) % 2 == 0:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
+    # Сохраняем список товаров в контекст
+    context.user_data['products'] = products
 
+    # Формируем текст с корзиной
+    cart = context.user_data.get('cart', {})
+    text = "📦 **Создание заявки на поставку**\n\n"
+    if cart:
+        text += "**Товары в заявке:**\n"
+        total = 0
+        for prod_id, item in cart.items():
+            subtotal = item['qty'] * item['price']
+            total += subtotal
+            text += f"• {item['name']}: {item['qty']} упак × {item['price']} руб = {subtotal} руб\n"
+        text += f"\n**Общая сумма: {total} руб**\n\n"
+    text += "**Доступные товары (остаток на складе Р):**"
+
+    # Клавиатура с товарами
+    keyboard = []
+    for prod in products:
+        prod_id = prod['id']
+        name = prod['product_name']
+        price = prod['price']
+        central_qty = prod['central_quantity']
+        button_text = f"{name} ({price} руб) – доступно {central_qty} упак"
+        keyboard.append([InlineKeyboardButton(button_text, callback_data=f"prod_{prod_id}")])
+
+    # Кнопка завершения, если корзина не пуста
+    if cart:
+        keyboard.append([InlineKeyboardButton("✅ Завершить заявку", callback_data="finish_cart")])
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_text(
-        "📦 Выберите товар для добавления в заявку:",
-        reply_markup=reply_markup
-    )
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
 
 async def product_selected(update: Update, context):
-    """Обработка выбора товара (запрос количества)."""
+    """Обработка выбора товара – запрашиваем количество."""
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data == "cancel":
+    if data == "finish_cart":
+        await show_cart_summary(update, context)
+        return CONFIRMING_CART
+    elif data == "cancel":
         await query.edit_message_text("❌ Создание заявки отменено.")
         await context.bot.send_message(
             chat_id=update.effective_user.id,
             text="Выберите действие:",
             reply_markup=get_main_menu()
         )
+        context.user_data.clear()
         return ConversationHandler.END
 
-    product_id = int(data.replace('product_', ''))
+    product_id = int(data.replace('prod_', ''))
     context.user_data['selected_product_id'] = product_id
 
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT product_name, price FROM products WHERE id = ?", (product_id,))
-        product = cursor.fetchone()
-
+    # Находим товар в списке
+    product = next((p for p in context.user_data['products'] if p['id'] == product_id), None)
     if not product:
         await query.edit_message_text("❌ Товар не найден.")
-        return ConversationHandler.END
+        return SELECTING_PRODUCT
 
     context.user_data['selected_product_name'] = product['product_name']
     context.user_data['selected_product_price'] = product['price']
+    context.user_data['selected_product_central_qty'] = product['central_quantity']
 
     await query.edit_message_text(
         f"Товар: {product['product_name']}\n"
-        f"Цена: {product['price']} руб/упак\n\n"
-        f"Введите количество упаковок (только целое число):",
+        f"Цена: {product['price']} руб/упак\n"
+        f"Доступно на складе Р: {product['central_quantity']} упак\n\n"
+        f"Введите количество упаковок для заказа (не больше {product['central_quantity']}):",
         reply_markup=None
+    )
+    await context.bot.send_message(
+        chat_id=update.effective_user.id,
+        text="Введите число:",
+        reply_markup=get_back_keyboard()
     )
     return ENTERING_QUANTITY
 
 async def quantity_entered(update: Update, context):
-    """Обработка ввода количества."""
+    """Обработка ввода количества – добавляем в корзину."""
     text = update.message.text
 
     if text == '🔙 Назад':
         await show_product_selection(update, context)
         return SELECTING_PRODUCT
-
-    if text == '❌ Отмена':
-        await update.message.reply_text(
-            "❌ Создание заявки отменено.",
-            reply_markup=get_main_menu()
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
 
     try:
         qty = int(text)
@@ -141,15 +174,24 @@ async def quantity_entered(update: Update, context):
             raise ValueError
     except ValueError:
         await update.message.reply_text(
-            "❌ Ошибка: введите целое положительное число.\n"
-            "Например: 5 или 10",
-            reply_markup=get_back_and_cancel_keyboard()
+            "❌ Ошибка: введите целое положительное число.",
+            reply_markup=get_back_keyboard()
         )
         return ENTERING_QUANTITY
 
+    # Проверяем доступное количество на складе Р
+    max_qty = context.user_data['selected_product_central_qty']
+    if qty > max_qty:
+        await update.message.reply_text(
+            f"❌ На складе Р недостаточно товара. Доступно только {max_qty} упак.",
+            reply_markup=get_back_keyboard()
+        )
+        return ENTERING_QUANTITY
+
+    # Добавляем в корзину
     prod_id = context.user_data['selected_product_id']
     prod_name = context.user_data['selected_product_name']
-    prod_price = context.user_data['selected_product_price']
+    price = context.user_data['selected_product_price']
 
     cart = context.user_data.get('cart', {})
     if prod_id in cart:
@@ -157,13 +199,13 @@ async def quantity_entered(update: Update, context):
     else:
         cart[prod_id] = {
             'name': prod_name,
-            'price': prod_price,
+            'price': price,
             'qty': qty
         }
     context.user_data['cart'] = cart
 
-    await show_cart_summary(update, context)
-    return CONFIRMING_CART
+    await show_product_selection(update, context)
+    return SELECTING_PRODUCT
 
 async def show_cart_summary(update: Update, context):
     """Отображает текущее содержимое корзины и кнопки действий."""
@@ -199,43 +241,6 @@ async def show_cart_summary(update: Update, context):
         await update.message.reply_text(
             text, reply_markup=reply_markup, parse_mode='Markdown'
         )
-
-async def add_more(update: Update, context):
-    """Возврат к выбору товара для добавления."""
-    query = update.callback_query
-    await query.answer()
-
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, product_name, price FROM products WHERE is_active = 1 ORDER BY product_name")
-        products = cursor.fetchall()
-
-    if not products:
-        await query.edit_message_text("❌ Нет доступных товаров.")
-        return SELECTING_PRODUCT
-
-    keyboard = []
-    row = []
-    for i, prod in enumerate(products):
-        button = InlineKeyboardButton(
-            f"{prod['product_name']} ({prod['price']} руб)",
-            callback_data=f"product_{prod['id']}"
-        )
-        row.append(button)
-        if (i + 1) % 2 == 0:
-            keyboard.append(row)
-            row = []
-    if row:
-        keyboard.append(row)
-
-    keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    await query.edit_message_text(
-        "📦 Выберите товар для добавления в заявку:",
-        reply_markup=reply_markup
-    )
-    return SELECTING_PRODUCT
 
 @send_backup_to_admin("создание заявки на поставку")
 async def confirm_order(update: Update, context):
@@ -304,6 +309,13 @@ async def confirm_order(update: Update, context):
 
     context.user_data.clear()
     return ConversationHandler.END
+
+async def add_more(update: Update, context):
+    """Возврат к выбору товара для добавления."""
+    query = update.callback_query
+    await query.answer()
+    await show_product_selection(update, context)
+    return SELECTING_PRODUCT
 
 async def cancel_all(update: Update, context):
     """Полная отмена создания заявки."""
@@ -376,15 +388,16 @@ orders_conv = ConversationHandler(
     entry_points=[MessageHandler(filters.Regex('^📦 Заявка на поставку$'), orders_start)],
     states={
         SELECTING_PRODUCT: [
-            CallbackQueryHandler(product_selected, pattern='^product_'),
+            CallbackQueryHandler(product_selected, pattern='^prod_'),
+            CallbackQueryHandler(product_selected, pattern='^finish_cart$'),
             CallbackQueryHandler(product_selected, pattern='^cancel$')
         ],
         ENTERING_QUANTITY: [
             MessageHandler(filters.TEXT & ~filters.COMMAND, quantity_entered)
         ],
         CONFIRMING_CART: [
-            CallbackQueryHandler(add_more, pattern='^add_more$'),
             CallbackQueryHandler(confirm_order, pattern='^confirm_order$'),
+            CallbackQueryHandler(add_more, pattern='^add_more$'),
             CallbackQueryHandler(cancel_all, pattern='^cancel_all$')
         ]
     },
