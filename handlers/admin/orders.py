@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 SELECTING_ORDER, CONFIRMING_SHIPMENT = range(2)
 
 async def admin_orders_start(update: Update, context):
-    """Главное меню управления поставками"""
     user_id = update.effective_user.id
-
     if user_id not in config.ADMIN_IDS:
         await update.message.reply_text("⛔ Доступ запрещен")
         return ConversationHandler.END
@@ -50,11 +48,9 @@ async def admin_orders_start(update: Update, context):
         f"Выберите действие:",
         reply_markup=reply_markup
     )
-
     return SELECTING_ORDER
 
 async def admin_orders_new(update: Update, context):
-    """Просмотр новых заявок"""
     query = update.callback_query
     await query.answer()
 
@@ -84,7 +80,6 @@ async def admin_orders_new(update: Update, context):
 
     text = "🟡 Новые заявки:\n\n"
     keyboard = []
-
     for order in orders:
         text += f"📋 {order['order_number']} ({order['seller_code']})\n"
         text += f"   {order['items']}\n"
@@ -94,18 +89,12 @@ async def admin_orders_new(update: Update, context):
             f"✅ {order['order_number']}",
             callback_data=f"admin_order_view_{order['id']}"
         )])
-
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back_to_menu")])
 
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECTING_ORDER
 
 async def admin_order_view(update: Update, context):
-    """Просмотр конкретной заявки"""
     query = update.callback_query
     await query.answer()
 
@@ -143,12 +132,10 @@ async def admin_order_view(update: Update, context):
     text += f"Дата: {order['created_at'][:16]}\n"
     text += f"Статус: {order['status']}\n\n"
     text += "Товары:\n"
-
     for item in items:
         text += f"• {item['product_name']}: {item['quantity_ordered']} упак × {item['price_at_order']} = {item['total']} руб\n"
 
     keyboard = []
-
     if order['status'] == 'new':
         keyboard.append([InlineKeyboardButton("✅ Подтвердить отгрузку", callback_data=f"admin_order_ship_{order_id}")])
         keyboard.append([InlineKeyboardButton("❌ Отменить заявку", callback_data=f"admin_order_cancel_{order_id}")])
@@ -157,68 +144,109 @@ async def admin_order_view(update: Update, context):
 
     keyboard.append([InlineKeyboardButton("🔙 Назад", callback_data="admin_orders_back_to_new")])
 
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECTING_ORDER
 
 @send_backup_to_admin("подтверждение отгрузки")
 async def admin_order_ship(update: Update, context):
-    """Подтверждение отгрузки – списание с центрального склада и добавление продавцу"""
+    """Подтверждение заявки: для Р – пополнение склада, для других – перераспределение"""
     query = update.callback_query
     await query.answer()
-    logger.info("admin_order_ship called")
-
     order_id = int(query.data.replace('admin_order_ship_', ''))
 
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        # Получаем все товары заявки
+        # Получаем данные заявки
         cursor.execute("""
-            SELECT oi.product_id, oi.quantity_ordered, oi.price_at_order,
-                   o.seller_id, o.seller_code, o.order_number
-            FROM order_items oi
-            JOIN orders o ON oi.order_id = o.id
-            WHERE oi.order_id = ?
+            SELECT o.seller_id, o.seller_code, o.order_number,
+                   oi.product_id, oi.quantity_ordered, oi.price_at_order
+            FROM orders o
+            JOIN order_items oi ON o.id = oi.order_id
+            WHERE o.id = ?
         """, (order_id,))
-        items = cursor.fetchall()
-        if not items:
+        rows = cursor.fetchall()
+        if not rows:
             await query.edit_message_text("❌ Заявка не найдена")
             return
 
-        seller_id = items[0]['seller_id']
-        seller_code = items[0]['seller_code']
-        order_number = items[0]['order_number']
+        seller_id = rows[0]['seller_id']
+        seller_code = rows[0]['seller_code']
+        order_number = rows[0]['order_number']
 
-        # Проверяем наличие на центральном складе
-        for item in items:
-            cursor.execute("SELECT quantity FROM central_stock WHERE product_id = ?", (item['product_id'],))
-            stock = cursor.fetchone()
-            if not stock or stock['quantity'] < item['quantity_ordered']:
-                product_id = item['product_id']
-                cursor.execute("SELECT product_name FROM products WHERE id = ?", (product_id,))
-                pname = cursor.fetchone()[0]
+        # Получаем ID продавца Р (центральный склад)
+        cursor.execute("SELECT id FROM sellers WHERE seller_code = 'Р'")
+        res = cursor.fetchone()
+        if not res:
+            await query.edit_message_text("❌ Продавец Р (центральный склад) не найден в БД.")
+            return
+        central_seller_id = res['id']
+
+        # Если заявка от самого Р – это пополнение его склада
+        if seller_id == central_seller_id:
+            # Просто добавляем товар на склад Р, увеличиваем его долг
+            for row in rows:
+                product_id = row['product_id']
+                qty = row['quantity_ordered']
+                price = row['price_at_order']
+                # Добавляем на склад Р
+                cursor.execute("SELECT quantity FROM seller_products WHERE seller_id = ? AND product_id = ?", (central_seller_id, product_id))
+                existing = cursor.fetchone()
+                if existing:
+                    cursor.execute("UPDATE seller_products SET quantity = quantity + ? WHERE seller_id = ? AND product_id = ?", (qty, central_seller_id, product_id))
+                else:
+                    cursor.execute("INSERT INTO seller_products (seller_id, product_id, quantity) VALUES (?, ?, ?)", (central_seller_id, product_id, qty))
+                # Увеличиваем долг Р
+                cursor.execute("SELECT total_debt FROM seller_debt WHERE seller_id = ?", (central_seller_id,))
+                debt = cursor.fetchone()
+                if debt:
+                    cursor.execute("UPDATE seller_debt SET total_debt = total_debt + ? WHERE seller_id = ?", (price * qty, central_seller_id))
+                else:
+                    cursor.execute("INSERT INTO seller_debt (seller_id, total_debt) VALUES (?, ?)", (central_seller_id, price * qty))
+            # Обновляем статус заявки
+            cursor.execute("UPDATE orders SET status = 'shipped', shipped_at = CURRENT_TIMESTAMP WHERE id = ?", (order_id,))
+            await query.edit_message_text(
+                f"✅ Заявка на пополнение склада Р подтверждена! Товар добавлен на склад Р.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔙 К заявкам", callback_data="admin_orders_back_to_menu")
+                ]])
+            )
+            # Уведомляем продавца Р (если есть telegram_id)
+            cursor.execute("SELECT telegram_id FROM sellers WHERE id = ?", (central_seller_id,))
+            res_tg = cursor.fetchone()
+            if res_tg and res_tg['telegram_id']:
+                try:
+                    await context.bot.send_message(
+                        chat_id=res_tg['telegram_id'],
+                        text=f"✅ Ваш склад пополнен!\n\nЗаявка №{order_number} подтверждена. Товар добавлен."
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить продавца Р: {e}")
+            return
+
+        # Иначе заявка от другого продавца – списываем со склада Р
+        # Проверяем наличие всех товаров на складе Р
+        for row in rows:
+            product_id = row['product_id']
+            qty = row['quantity_ordered']
+            cursor.execute("SELECT quantity FROM seller_products WHERE seller_id = ? AND product_id = ?", (central_seller_id, product_id))
+            stock_row = cursor.fetchone()
+            if not stock_row or stock_row['quantity'] < qty:
                 await query.edit_message_text(
-                    f"❌ Недостаточно товара на центральном складе для продукта {pname}.\n"
-                    f"Доступно: {stock['quantity'] if stock else 0}, требуется: {item['quantity_ordered']}"
+                    f"❌ Недостаточно товара на центральном складе (продавца Р) для продукта {row['product_id']}.\n"
+                    f"Доступно: {stock_row['quantity'] if stock_row else 0}, требуется: {qty}"
                 )
                 return
 
-        # Обновляем статус заявки
-        cursor.execute("UPDATE orders SET status = 'shipped', shipped_at = CURRENT_TIMESTAMP WHERE id = ?", (order_id,))
+        # Списываем со склада Р и добавляем на склад заказчика
+        for row in rows:
+            product_id = row['product_id']
+            qty = row['quantity_ordered']
+            price = row['price_at_order']
 
-        # Списываем с центрального склада и добавляем продавцу
-        for item in items:
-            product_id = item['product_id']
-            qty = item['quantity_ordered']
-            price = item['price_at_order']
+            # Списываем со склада Р
+            cursor.execute("UPDATE seller_products SET quantity = quantity - ? WHERE seller_id = ? AND product_id = ?", (qty, central_seller_id, product_id))
 
-            # Списываем с центрального склада
-            cursor.execute("UPDATE central_stock SET quantity = quantity - ? WHERE product_id = ?", (qty, product_id))
-
-            # Добавляем на склад продавца
+            # Добавляем на склад заказчика
             cursor.execute("SELECT quantity FROM seller_products WHERE seller_id = ? AND product_id = ?", (seller_id, product_id))
             existing = cursor.fetchone()
             if existing:
@@ -226,57 +254,40 @@ async def admin_order_ship(update: Update, context):
             else:
                 cursor.execute("INSERT INTO seller_products (seller_id, product_id, quantity) VALUES (?, ?, ?)", (seller_id, product_id, qty))
 
-            # Увеличиваем долг продавца
+            # Увеличиваем долг заказчика
             cursor.execute("SELECT total_debt FROM seller_debt WHERE seller_id = ?", (seller_id,))
             debt = cursor.fetchone()
-            amount = price * qty
             if debt:
-                cursor.execute("UPDATE seller_debt SET total_debt = total_debt + ? WHERE seller_id = ?", (amount, seller_id))
+                cursor.execute("UPDATE seller_debt SET total_debt = total_debt + ? WHERE seller_id = ?", (price * qty, seller_id))
             else:
-                cursor.execute("INSERT INTO seller_debt (seller_id, total_debt) VALUES (?, ?)", (seller_id, amount))
+                cursor.execute("INSERT INTO seller_debt (seller_id, total_debt) VALUES (?, ?)", (seller_id, price * qty))
 
-        # Формируем сводку для уведомления
-        items_summary = []
-        for item in items:
-            cursor.execute("SELECT product_name FROM products WHERE id = ?", (item['product_id'],))
-            pname = cursor.fetchone()[0]
-            items_summary.append(f"• {pname}: {item['quantity_ordered']} упак")
-        items_text = "\n".join(items_summary)
+        # Обновляем статус заявки
+        cursor.execute("UPDATE orders SET status = 'shipped', shipped_at = CURRENT_TIMESTAMP WHERE id = ?", (order_id,))
 
-    # Уведомляем продавца
-    seller_tg_id = None
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
+        # Уведомляем заказчика
         cursor.execute("SELECT telegram_id FROM sellers WHERE id = ?", (seller_id,))
-        res = cursor.fetchone()
-        if res:
-            seller_tg_id = res['telegram_id']
-    if seller_tg_id:
-        try:
-            await context.bot.send_message(
-                chat_id=seller_tg_id,
-                text=f"🚚 **Статус заявки изменён**\n\n"
-                     f"Номер: {order_number}\n"
-                     f"Ваша заявка переведена в статус **«В пути»**.\n"
-                     f"{items_text}\n\n"
-                     f"Когда получите товар, подтвердите получение в разделе «📤 Отгруженные поставки»."
-            )
-        except Exception as e:
-            logger.error(f"Не удалось уведомить продавца {seller_tg_id}: {e}")
+        res_tg = cursor.fetchone()
+        if res_tg and res_tg['telegram_id']:
+            try:
+                await context.bot.send_message(
+                    chat_id=res_tg['telegram_id'],
+                    text=f"🚚 Ваша заявка №{order_number} переведена в статус «В пути»."
+                )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить продавца {seller_id}: {e}")
 
     await query.edit_message_text(
-        "✅ Отгрузка подтверждена! Товар списан с центрального склада и добавлен продавцу.",
+        f"✅ Отгрузка подтверждена! Товар списан со склада Р и добавлен продавцу {seller_code}.",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 К заявкам", callback_data="admin_orders_back_to_menu")
         ]])
     )
-    return SELECTING_ORDER
 
 async def admin_orders_back_to_menu(update: Update, context):
-    """Возврат в главное меню поставок"""
     query = update.callback_query
     await query.answer()
-
+    # Возврат в главное меню поставок
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'new'")
@@ -305,19 +316,12 @@ async def admin_orders_back_to_menu(update: Update, context):
         f"Выберите действие:",
         reply_markup=reply_markup
     )
-
     return SELECTING_ORDER
 
 async def admin_orders_exit(update: Update, context):
-    """Выход в главное админское меню"""
     query = update.callback_query
     await query.answer()
-
-    await query.edit_message_text(
-        "Выход в главное меню",
-        reply_markup=get_admin_menu()
-    )
-
+    await query.edit_message_text("Выход в главное меню", reply_markup=get_admin_menu())
     return ConversationHandler.END
 
 admin_orders_conv = ConversationHandler(
