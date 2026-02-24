@@ -11,7 +11,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ConversationHandler, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 from database import db
 from config import config
-from keyboards import get_main_menu, get_back_keyboard, get_confirm_keyboard
+from keyboards import get_seller_menu, get_back_keyboard
 from backup_decorator import send_backup_to_admin
 import logging
 from datetime import datetime
@@ -34,7 +34,7 @@ async def orders_start(update: Update, context):
     if not seller:
         await update.message.reply_text(
             "❌ Вы не активированы как продавец. Нажмите /start для активации.",
-            reply_markup=get_main_menu()
+            reply_markup=get_seller_menu(None)  # fallback
         )
         return ConversationHandler.END
 
@@ -72,14 +72,12 @@ async def show_product_selection(update: Update, context):
     if not products:
         await update.message.reply_text(
             "❌ В данный момент нет доступных товаров.",
-            reply_markup=get_main_menu()
+            reply_markup=get_seller_menu(context.user_data['seller_code'])
         )
         return ConversationHandler.END
 
-    # Сохраняем список товаров в контекст
     context.user_data['products'] = products
 
-    # Формируем текст с корзиной
     cart = context.user_data.get('cart', {})
     text = "📦 **Создание заявки на поставку**\n\n"
     if cart:
@@ -92,7 +90,6 @@ async def show_product_selection(update: Update, context):
         text += f"\n**Общая сумма: {total} руб**\n\n"
     text += "**Доступные товары (остаток на складе Р):**"
 
-    # Клавиатура с товарами
     keyboard = []
     for prod in products:
         prod_id = prod['id']
@@ -102,7 +99,6 @@ async def show_product_selection(update: Update, context):
         button_text = f"{name} ({price} руб) – доступно {central_qty} упак"
         keyboard.append([InlineKeyboardButton(button_text, callback_data=f"prod_{prod_id}")])
 
-    # Кнопка завершения, если корзина не пуста
     if cart:
         keyboard.append([InlineKeyboardButton("✅ Завершить заявку", callback_data="finish_cart")])
     keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel")])
@@ -128,7 +124,7 @@ async def product_selected(update: Update, context):
         await context.bot.send_message(
             chat_id=update.effective_user.id,
             text="Выберите действие:",
-            reply_markup=get_main_menu()
+            reply_markup=get_seller_menu(context.user_data['seller_code'])
         )
         context.user_data.clear()
         return ConversationHandler.END
@@ -136,7 +132,6 @@ async def product_selected(update: Update, context):
     product_id = int(data.replace('prod_', ''))
     context.user_data['selected_product_id'] = product_id
 
-    # Находим товар в списке
     product = next((p for p in context.user_data['products'] if p['id'] == product_id), None)
     if not product:
         await query.edit_message_text("❌ Товар не найден.")
@@ -179,7 +174,6 @@ async def quantity_entered(update: Update, context):
         )
         return ENTERING_QUANTITY
 
-    # Проверяем доступное количество на складе Р
     max_qty = context.user_data['selected_product_central_qty']
     if qty > max_qty:
         await update.message.reply_text(
@@ -188,7 +182,6 @@ async def quantity_entered(update: Update, context):
         )
         return ENTERING_QUANTITY
 
-    # Добавляем в корзину
     prod_id = context.user_data['selected_product_id']
     prod_name = context.user_data['selected_product_name']
     price = context.user_data['selected_product_price']
@@ -288,7 +281,7 @@ async def confirm_order(update: Update, context):
     await context.bot.send_message(
         chat_id=update.effective_user.id,
         text="Выберите следующее действие:",
-        reply_markup=get_main_menu()
+        reply_markup=get_seller_menu(seller_code)
     )
 
     # Уведомляем админов
@@ -326,7 +319,7 @@ async def cancel_all(update: Update, context):
     await context.bot.send_message(
         chat_id=update.effective_user.id,
         text="Выберите действие:",
-        reply_markup=get_main_menu()
+        reply_markup=get_seller_menu(context.user_data.get('seller_code'))
     )
     return ConversationHandler.END
 
@@ -335,17 +328,18 @@ async def my_orders(update: Update, context):
     user_id = update.effective_user.id
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM sellers WHERE telegram_id = ?", (user_id,))
+        cursor.execute("SELECT id, seller_code FROM sellers WHERE telegram_id = ?", (user_id,))
         result = cursor.fetchone()
 
     if not result:
         await update.message.reply_text(
             "❌ Вы не активированы как продавец.",
-            reply_markup=get_main_menu()
+            reply_markup=get_seller_menu(None)
         )
         return
 
-    seller_id = result[0]
+    seller_id = result['id']
+    seller_code = result['seller_code']
 
     with db.get_connection() as conn:
         cursor = conn.cursor()
@@ -365,7 +359,7 @@ async def my_orders(update: Update, context):
     if not orders:
         await update.message.reply_text(
             "У вас пока нет заявок.",
-            reply_markup=get_main_menu()
+            reply_markup=get_seller_menu(seller_code)
         )
         return
 
@@ -380,7 +374,7 @@ async def my_orders(update: Update, context):
         text += f"{status_emoji} {order['order_number']} от {order['created_at'][:10]}\n"
         text += f"   {order['items']}\n\n"
 
-    await update.message.reply_text(text, reply_markup=get_main_menu())
+    await update.message.reply_text(text, reply_markup=get_seller_menu(seller_code))
 
 my_orders_handler = MessageHandler(filters.Regex('^📋 Мои заявки$'), my_orders)
 
