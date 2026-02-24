@@ -36,8 +36,9 @@ from handlers.common import start, menu_handler, handle_message, activation_conv
 from handlers.seller.orders import orders_conv, my_orders_handler
 from handlers.seller.shipments import shipments_conv
 from handlers.seller.sales import sales_conv
-from handlers.seller.stock import stock_handler, back_to_main_handler  # добавлен back_to_main_handler
+from handlers.seller.stock import stock_handler, back_to_main_handler
 from handlers.seller.payment import payment_conv
+from handlers.seller.restock import restock_conv          # новый импорт
 
 # Обработчики администратора
 from handlers.admin.orders import admin_orders_conv
@@ -47,6 +48,7 @@ from handlers.admin.settings import admin_settings_conv
 from handlers.admin.backup import manual_backup
 from handlers.admin.restore import restore_conv
 from handlers.admin.add_test_seller import add_seller_handler
+from handlers.admin.restock import restock_admin_conv    # новый импорт
 
 # Настройка логирования
 logging.basicConfig(
@@ -164,17 +166,19 @@ async def run_webhook():
     application.add_handler(shipments_conv)
     application.add_handler(sales_conv)
     application.add_handler(payment_conv)
+    application.add_handler(restock_conv)               # заявки на пополнение (продавец)
     
     # ConversationHandler'ы администратора
     application.add_handler(admin_orders_conv)
     application.add_handler(admin_payments_conv)
     application.add_handler(admin_reports_conv)
     application.add_handler(admin_settings_conv)
+    application.add_handler(restock_admin_conv)         # обработка заявок (админ)
     
     # Обычные обработчики (MessageHandler и CallbackQueryHandler)
     application.add_handler(my_orders_handler)
     application.add_handler(stock_handler)
-    application.add_handler(back_to_main_handler)  # ← добавлен обработчик для кнопки "В меню"
+    application.add_handler(back_to_main_handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     webhook_url = f"{URL}/telegram"
@@ -236,13 +240,15 @@ def main():
         application.add_handler(shipments_conv)
         application.add_handler(sales_conv)
         application.add_handler(payment_conv)
+        application.add_handler(restock_conv)
         application.add_handler(admin_orders_conv)
         application.add_handler(admin_payments_conv)
         application.add_handler(admin_reports_conv)
         application.add_handler(admin_settings_conv)
+        application.add_handler(restock_admin_conv)
         application.add_handler(my_orders_handler)
         application.add_handler(stock_handler)
-        application.add_handler(back_to_main_handler)  # ← добавлен обработчик для кнопки "В меню"
+        application.add_handler(back_to_main_handler)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         
         logger.info("✅ Бот запущен и готов к работе (polling)")
